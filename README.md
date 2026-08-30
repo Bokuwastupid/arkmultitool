@@ -87,6 +87,8 @@ point `STEAM_COMPAT_DATA_PATH` at that prefix instead.
 - Right-click any checkbox or switch to add a keyboard or mouse bind and choose Hold/Toggle mode.
 - The `Hotkeys` tab shows every configured feature bind, its current state, list visibility and remove action.
 - The compact `ACTIVE HOTKEYS` window displays visible binds only while they are active; its position is configurable.
+- `ESP > Search > Structure catalog` accumulates every live structure class (including mod structures), supports name/class search and an exact saved whitelist.
+- Local profiles can be deleted from the Runtime profile manager with a protected two-click confirmation; the base configuration is never a deletion target.
 - Drag the lower-right menu grip to resize it; the saved width and height are part of the local configuration.
 - `WASD` and `Q/E` or `Ctrl/Space` — move the free camera.
 - `Shift` — freecam sprint; mouse wheel changes its live speed.

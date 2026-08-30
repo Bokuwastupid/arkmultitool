@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace
 {
@@ -150,6 +151,7 @@ namespace
             {L"esp.radar", L"Radar", L"Radar", &S::show_radar},
             {L"esp.threat", L"Threat panel", L"Radar", &S::show_threat_panel},
             {L"esp.grouping", L"Group dense structures", L"Radar", &S::structure_grouping},
+            {L"esp.structure_whitelist", L"Use selected structure list", L"Structures", &S::structure_whitelist_enabled},
             {L"esp.declutter", L"Smart declutter", L"Radar", &S::smart_declutter},
             {L"camera.freecam", L"Free camera", L"Camera", &S::freecam},
             {L"camera.fov", L"FOV override", L"Camera", &S::fov_override},
@@ -208,6 +210,91 @@ namespace
             start = end + 1;
         }
         return false;
+    }
+
+    std::vector<std::wstring> exact_tokens(const std::wstring& list)
+    {
+        std::vector<std::wstring> values;
+        std::size_t start{};
+        while (start <= list.size())
+        {
+            const std::size_t end = list.find(L';', start);
+            std::wstring value = list.substr(start,
+                end == std::wstring::npos ? list.size() - start : end - start);
+            const auto first = value.find_first_not_of(L" \t\r\n");
+            const auto last = value.find_last_not_of(L" \t\r\n");
+            if (first != std::wstring::npos)
+            {
+                value = value.substr(first, last - first + 1);
+                const std::wstring lowered = lower_copy(value);
+                const bool duplicate = std::any_of(values.begin(), values.end(), [&](const auto& existing) {
+                    return lower_copy(existing) == lowered;
+                });
+                if (!duplicate) values.push_back(std::move(value));
+            }
+            if (end == std::wstring::npos) break;
+            start = end + 1;
+        }
+        return values;
+    }
+
+    bool exact_token_contains(const std::wstring& list, const std::wstring& value)
+    {
+        const std::wstring lowered = lower_copy(value);
+        const auto values = exact_tokens(list);
+        return std::any_of(values.begin(), values.end(), [&](const auto& token) {
+            return lower_copy(token) == lowered;
+        });
+    }
+
+    void set_exact_token(std::wstring& list, const std::wstring& value, const bool present)
+    {
+        std::vector<std::wstring> values = exact_tokens(list);
+        const std::wstring lowered = lower_copy(value);
+        std::erase_if(values, [&](const auto& token) { return lower_copy(token) == lowered; });
+        if (present && !value.empty()) values.push_back(value);
+        std::sort(values.begin(), values.end(), [](const auto& left, const auto& right) {
+            return lower_copy(left) < lower_copy(right);
+        });
+        list.clear();
+        for (const auto& token : values)
+        {
+            if (!list.empty()) list += L';';
+            list += token;
+        }
+    }
+
+    std::wstring pretty_structure_class(std::wstring value)
+    {
+        if (value.ends_with(L"_C")) value.resize(value.size() - 2);
+        static constexpr std::array<std::wstring_view, 5> prefixes{
+            L"PrimalStructure", L"Structure_", L"Structure", L"BP_", L"PrimalItemStructure_"};
+        for (const auto prefix : prefixes)
+        {
+            if (value.starts_with(prefix))
+            {
+                value.erase(0, prefix.size());
+                break;
+            }
+        }
+        std::wstring result;
+        result.reserve(value.size() + 8);
+        for (std::size_t index = 0; index < value.size(); ++index)
+        {
+            const wchar_t character = value[index];
+            if (character == L'_')
+            {
+                if (!result.empty() && result.back() != L' ') result.push_back(L' ');
+                continue;
+            }
+            if (index > 0 && std::iswupper(character) != 0 &&
+                std::iswlower(value[index - 1]) != 0 && !result.empty() && result.back() != L' ')
+                result.push_back(L' ');
+            result.push_back(character);
+        }
+        while (!result.empty() && result.front() == L' ') result.erase(result.begin());
+        while (!result.empty() && result.back() == L' ') result.pop_back();
+        return result.empty() ? value : result;
     }
 
     std::wstring fixed(const float value, const int precision = 0)
@@ -666,14 +753,25 @@ namespace kopt
         const Snapshot& snapshot = runtime.snapshot();
         if (!snapshot.camera.valid) return;
         const std::wstring search = lower_copy(settings.esp_search);
+        std::unordered_set<std::wstring> selected_structure_classes;
+        if (settings.structure_whitelist_enabled)
+        {
+            for (auto& class_name : exact_tokens(settings.selected_structure_types))
+                selected_structure_classes.insert(lower_copy(std::move(class_name)));
+        }
         const auto actor_text_filtered = [&](const Actor& actor) {
             if (token_list_contains(settings.hidden_tribes, actor.tribe)) return true;
             if (actor.kind == ActorKind::dino &&
                 (token_list_contains(settings.hidden_dino_types, actor.class_name) ||
                     token_list_contains(settings.hidden_dino_types, actor.name))) return true;
-            if (actor.kind == ActorKind::structure &&
-                (token_list_contains(settings.hidden_structure_types, actor.class_name) ||
-                    token_list_contains(settings.hidden_structure_types, actor.name))) return true;
+            if (actor.kind == ActorKind::structure)
+            {
+                if (settings.structure_whitelist_enabled &&
+                    !selected_structure_classes.contains(lower_copy(actor.class_name))) return true;
+                if (!settings.structure_whitelist_enabled &&
+                    (token_list_contains(settings.hidden_structure_types, actor.class_name) ||
+                        token_list_contains(settings.hidden_structure_types, actor.name))) return true;
+            }
             if (search.empty()) return false;
             return lower_copy(actor.name).find(search) == std::wstring::npos &&
                 lower_copy(actor.tribe).find(search) == std::wstring::npos &&
@@ -1885,16 +1983,144 @@ namespace kopt
             }
             else if (active_esp_section_ == 7)
             {
-                text_input(L"Live search: name / tribe / class", settings.esp_search, 1, content_left, y, input, 128);
-                text_input(L"Hidden tribes (separate with ;)", settings.hidden_tribes, 2, content_left, y, input, 256);
-                text_input(L"Hidden dino types (class/name; separated)", settings.hidden_dino_types, 3,
-                    content_left, y, input, 512);
-                text_input(L"Hidden structure types (class/name; separated)", settings.hidden_structure_types, 4,
-                    content_left, y, input, 512);
-                text_input(L"Grouped structure types (empty = all)", settings.grouped_structure_types, 5,
-                    content_left, y, input, 512);
-                text(L"Filters apply live to ESP, radar grouping and summaries. They never alter game state.",
-                    {content_left + 2.0F, y + 4.0F, frame.right - 32.0F, y + 44.0F}, text_secondary, 12.0F);
+                if (button(L"Quick filters", {content_left, y, content_left + 248.0F, y + 30.0F},
+                    search_settings_page_ == 0, input)) search_settings_page_ = 0;
+                if (button(L"Structure catalog", {content_left + 256.0F, y, content_left + 504.0F, y + 30.0F},
+                    search_settings_page_ == 1, input)) search_settings_page_ = 1;
+                y += 42.0F;
+                if (search_settings_page_ == 0)
+                {
+                    text_input(L"Live search: name / tribe / class", settings.esp_search, 1, content_left, y, input, 128);
+                    text_input(L"Hidden tribes (separate with ;)", settings.hidden_tribes, 2, content_left, y, input, 256);
+                    text_input(L"Hidden dino types (class/name; separated)", settings.hidden_dino_types, 3,
+                        content_left, y, input, 512);
+                    text_input(L"Legacy hidden structures (used when catalog mode is off)",
+                        settings.hidden_structure_types, 4, content_left, y, input, 512);
+                    text_input(L"Grouped structure types (empty = all)", settings.grouped_structure_types, 5,
+                        content_left, y, input, 512);
+                    text(L"Filters apply live to ESP, radar grouping and summaries. They never alter game state.",
+                        {content_left + 2.0F, y + 4.0F, frame.right - 32.0F, y + 44.0F}, text_secondary, 12.0F);
+                }
+                else
+                {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now >= structure_catalog_refresh_at_)
+                    {
+                        structure_catalog_refresh_at_ = now + std::chrono::seconds(1);
+                        std::unordered_map<std::wstring, std::size_t> catalog_index;
+                        catalog_index.reserve(structure_catalog_.size() + 64);
+                        for (std::size_t index = 0; index < structure_catalog_.size(); ++index)
+                            catalog_index.emplace(lower_copy(structure_catalog_[index].class_name), index);
+                        for (const auto& known_class : exact_tokens(settings.known_structure_types))
+                        {
+                            const std::wstring lowered = lower_copy(known_class);
+                            if (!catalog_index.contains(lowered))
+                            {
+                                catalog_index.emplace(lowered, structure_catalog_.size());
+                                structure_catalog_.push_back({known_class, pretty_structure_class(known_class), 0});
+                            }
+                        }
+                        for (auto& item : structure_catalog_) item.live_instances = 0;
+                        for (const Actor& actor : runtime.snapshot().actors)
+                        {
+                            if (actor.kind != ActorKind::structure || actor.class_name.empty()) continue;
+                            const std::wstring lowered = lower_copy(actor.class_name);
+                            const auto found = catalog_index.find(lowered);
+                            if (found == catalog_index.end())
+                            {
+                                catalog_index.emplace(lowered, structure_catalog_.size());
+                                structure_catalog_.push_back({actor.class_name,
+                                    pretty_structure_class(actor.class_name), 1});
+                            }
+                            else ++structure_catalog_[found->second].live_instances;
+                        }
+                        std::sort(structure_catalog_.begin(), structure_catalog_.end(),
+                            [](const StructureCatalogItem& left, const StructureCatalogItem& right) {
+                                const std::wstring left_name = lower_copy(left.display_name);
+                                const std::wstring right_name = lower_copy(right.display_name);
+                                return left_name != right_name ? left_name < right_name :
+                                    lower_copy(left.class_name) < lower_copy(right.class_name);
+                            });
+                        settings.known_structure_types.clear();
+                        for (const auto& item : structure_catalog_)
+                        {
+                            if (!settings.known_structure_types.empty()) settings.known_structure_types += L';';
+                            settings.known_structure_types += item.class_name;
+                        }
+                    }
+
+                    checkbox(L"Use selected structure list", settings.structure_whitelist_enabled,
+                        content_left, y, input);
+                    if (text_input(L"Search build name or class", structure_catalog_search_, 31,
+                        content_left, y, input, 96)) structure_catalog_page_ = 0;
+                    const std::wstring catalog_search = lower_copy(structure_catalog_search_);
+                    std::vector<StructureCatalogItem*> filtered;
+                    for (auto& item : structure_catalog_)
+                    {
+                        if (!catalog_search.empty() &&
+                            lower_copy(item.display_name).find(catalog_search) == std::wstring::npos &&
+                            lower_copy(item.class_name).find(catalog_search) == std::wstring::npos) continue;
+                        filtered.push_back(&item);
+                    }
+                    if (button(L"Enable filtered", {content_left, y, content_left + 162.0F, y + 32.0F},
+                        true, input))
+                        for (const auto* item : filtered)
+                            set_exact_token(settings.selected_structure_types, item->class_name, true);
+                    if (button(L"Disable filtered", {content_left + 170.0F, y, content_left + 332.0F, y + 32.0F},
+                        false, input))
+                        for (const auto* item : filtered)
+                            set_exact_token(settings.selected_structure_types, item->class_name, false);
+                    if (button(L"Clear search", {content_left + 340.0F, y, content_left + 502.0F, y + 32.0F},
+                        false, input))
+                    {
+                        structure_catalog_search_.clear();
+                        structure_catalog_page_ = 0;
+                    }
+                    y += 40.0F;
+                    const std::size_t selected_count = exact_tokens(settings.selected_structure_types).size();
+                    int live_types{};
+                    for (const auto& item : structure_catalog_) if (item.live_instances > 0) ++live_types;
+                    text(L"Selected " + std::to_wstring(selected_count) + L" / catalog " +
+                        std::to_wstring(structure_catalog_.size()) + L" · live types " +
+                        std::to_wstring(live_types),
+                        {content_left + 2.0F, y, content_left + 500.0F, y + 22.0F}, text_secondary, 11.0F);
+                    y += 25.0F;
+
+                    constexpr int structures_per_page = 6;
+                    const int page_count = std::max(1, static_cast<int>(
+                        (filtered.size() + structures_per_page - 1) / structures_per_page));
+                    structure_catalog_page_ = std::clamp(structure_catalog_page_, 0, page_count - 1);
+                    const int begin = structure_catalog_page_ * structures_per_page;
+                    const int end = std::min(static_cast<int>(filtered.size()), begin + structures_per_page);
+                    if (filtered.empty())
+                    {
+                        text(structure_catalog_.empty() ?
+                            L"Catalog will populate from the next live world scan." : L"No structures match this search.",
+                            {content_left + 2.0F, y, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
+                        y += 48.0F;
+                    }
+                    for (int index = begin; index < end; ++index)
+                    {
+                        const StructureCatalogItem& item = *filtered[static_cast<std::size_t>(index)];
+                        bool selected = exact_token_contains(settings.selected_structure_types, item.class_name);
+                        if (checkbox(item.display_name + (item.live_instances > 0 ?
+                            L"  [" + std::to_wstring(item.live_instances) + L"]" : L""),
+                            selected, content_left, y, input))
+                            set_exact_token(settings.selected_structure_types, item.class_name, selected);
+                        text(item.class_name, {content_left + 31.0F, y - 9.0F,
+                            content_left + content_width_ - 10.0F, y + 9.0F}, text_secondary, 9.0F);
+                        y += 12.0F;
+                    }
+                    if (page_count > 1)
+                    {
+                        if (button(L"Previous", {content_left, y, content_left + 110.0F, y + 30.0F}, true, input))
+                            structure_catalog_page_ = (structure_catalog_page_ + page_count - 1) % page_count;
+                        if (button(L"Next", {content_left + 120.0F, y, content_left + 230.0F, y + 30.0F}, true, input))
+                            structure_catalog_page_ = (structure_catalog_page_ + 1) % page_count;
+                        text(std::to_wstring(structure_catalog_page_ + 1) + L" / " + std::to_wstring(page_count),
+                            {content_left + 250.0F, y, frame.right - 32.0F, y + 30.0F}, text_secondary, 11.0F);
+                    }
+                }
             }
             else
             {
@@ -2044,15 +2270,57 @@ namespace kopt
                 {
                     profile_index_ = (profile_index_ + profiles.size() - 1) % profiles.size();
                     profile_name_ = profiles[profile_index_].stem().wstring();
+                    profile_delete_confirmation_.clear();
                 }
                 if (button(L"Next", {content_left + 120.0F, y, content_left + 230.0F, y + 34.0F}, true, input))
                 {
                     profile_index_ = (profile_index_ + 1) % profiles.size();
                     profile_name_ = profiles[profile_index_].stem().wstring();
+                    profile_delete_confirmation_.clear();
                 }
                 text(L"Selected: " + profiles[profile_index_].stem().wstring(),
                     {content_left + 242.0F, y + 3.0F, frame.right - 32.0F, y + 32.0F}, text_secondary, 12.0F);
+                y += 44.0F;
+                const std::filesystem::path selected_profile = profiles[profile_index_];
+                const std::wstring selected_name = selected_profile.stem().wstring();
+                const auto confirmation_now = std::chrono::steady_clock::now();
+                if (confirmation_now >= profile_delete_confirmation_until_)
+                    profile_delete_confirmation_.clear();
+                const bool confirming = profile_delete_confirmation_ == selected_name;
+                if (button(confirming ? L"Confirm delete " + selected_name : L"Delete selected profile",
+                    {content_left, y, content_left + 250.0F, y + 36.0F}, false, input))
+                {
+                    if (!confirming)
+                    {
+                        profile_delete_confirmation_ = selected_name;
+                        profile_delete_confirmation_until_ = confirmation_now + std::chrono::seconds(6);
+                        toast_ = L"Press delete again to confirm: " + selected_name;
+                    }
+                    else
+                    {
+                        std::error_code delete_error;
+                        const bool safe_target = selected_profile.parent_path() == profiles_directory &&
+                            selected_profile.extension() == L".ini" &&
+                            !std::filesystem::is_symlink(selected_profile, delete_error);
+                        const bool removed = safe_target && !delete_error &&
+                            std::filesystem::remove(selected_profile, delete_error);
+                        toast_ = removed && !delete_error ? L"Profile deleted: " + selected_name :
+                            L"Could not delete profile: " + selected_name;
+                        if (removed)
+                        {
+                            profile_name_ = L"default";
+                            profile_index_ = 0;
+                        }
+                        profile_delete_confirmation_.clear();
+                    }
+                    toast_until_ = confirmation_now + std::chrono::seconds(3);
+                }
+                text(L"Only the selected file inside profiles\\ is removed; the base configuration is protected.",
+                    {content_left + 262.0F, y, frame.right - 32.0F, y + 38.0F}, text_secondary, 10.0F);
             }
+            else
+                text(L"No saved profiles yet.", {content_left + 2.0F, y,
+                    frame.right - 32.0F, y + 32.0F}, text_secondary, 12.0F);
         }
         else if (active_tab_ == 4)
         {

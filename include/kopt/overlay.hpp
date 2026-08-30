@@ -164,6 +164,8 @@ namespace kopt
         int element_settings_page_{};
         int gear_settings_page_{};
         int radar_settings_page_{};
+        int search_settings_page_{};
+        int structure_catalog_page_{};
         int camera_settings_page_{};
         int alert_settings_page_{};
         int hotkey_page_{};
@@ -204,6 +206,17 @@ namespace kopt
         float preview_drag_offset_y_{};
         std::wstring profile_name_{L"default"};
         std::size_t profile_index_{};
+        std::wstring profile_delete_confirmation_;
+        std::chrono::steady_clock::time_point profile_delete_confirmation_until_{};
+        std::wstring structure_catalog_search_;
+        struct StructureCatalogItem
+        {
+            std::wstring class_name;
+            std::wstring display_name;
+            int live_instances{};
+        };
+        std::vector<StructureCatalogItem> structure_catalog_;
+        std::chrono::steady_clock::time_point structure_catalog_refresh_at_{};
         Settings* settings_context_{};
         struct FeatureBindingRuntime
         {

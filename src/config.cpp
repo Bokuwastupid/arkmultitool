@@ -8,7 +8,7 @@
 
 namespace
 {
-    constexpr std::uint32_t settings_schema_version = 18U;
+    constexpr std::uint32_t settings_schema_version = 19U;
 
     bool read_bool(const std::filesystem::path& path, const wchar_t* section,
         const wchar_t* key, const bool fallback)
@@ -273,6 +273,8 @@ namespace kopt
         show_radar = read_bool(path, L"ESP", L"Radar", show_radar);
         show_threat_panel = read_bool(path, L"ESP", L"ThreatPanel", show_threat_panel);
         structure_grouping = read_bool(path, L"ESP", L"StructureGrouping", structure_grouping);
+        structure_whitelist_enabled = read_bool(path, L"ESP", L"StructureWhitelistEnabled",
+            structure_whitelist_enabled);
         show_tracers = read_bool(path, L"ESP", L"Tracers", show_tracers);
         offscreen_arrows = read_bool(path, L"ESP", L"OffscreenArrows", offscreen_arrows);
         esp_show_enemies = read_bool(path, L"ESP", L"ShowEnemies", esp_show_enemies);
@@ -349,6 +351,8 @@ namespace kopt
         hidden_dino_types = read_string(path, L"ESP", L"HiddenDinoTypes");
         hidden_structure_types = read_string(path, L"ESP", L"HiddenStructureTypes");
         grouped_structure_types = read_string(path, L"ESP", L"GroupedStructureTypes");
+        selected_structure_types = read_string(path, L"ESP", L"SelectedStructureTypes");
+        known_structure_types = read_string(path, L"ESP", L"KnownStructureTypes");
         alerts_enabled = read_bool(path, L"Alerts", L"Enabled", alerts_enabled);
         alert_new_player = read_bool(path, L"Alerts", L"NewPlayer", alert_new_player);
         alert_approach = read_bool(path, L"Alerts", L"Approach", alert_approach);
@@ -521,6 +525,7 @@ namespace kopt
         write_bool(path, L"ESP", L"Radar", show_radar);
         write_bool(path, L"ESP", L"ThreatPanel", show_threat_panel);
         write_bool(path, L"ESP", L"StructureGrouping", structure_grouping);
+        write_bool(path, L"ESP", L"StructureWhitelistEnabled", structure_whitelist_enabled);
         write_bool(path, L"ESP", L"Tracers", show_tracers);
         write_bool(path, L"ESP", L"OffscreenArrows", offscreen_arrows);
         write_bool(path, L"ESP", L"ShowEnemies", esp_show_enemies);
@@ -596,6 +601,8 @@ namespace kopt
         write_value(path, L"ESP", L"HiddenDinoTypes", hidden_dino_types);
         write_value(path, L"ESP", L"HiddenStructureTypes", hidden_structure_types);
         write_value(path, L"ESP", L"GroupedStructureTypes", grouped_structure_types);
+        write_value(path, L"ESP", L"SelectedStructureTypes", selected_structure_types);
+        write_value(path, L"ESP", L"KnownStructureTypes", known_structure_types);
         write_bool(path, L"Alerts", L"Enabled", alerts_enabled);
         write_bool(path, L"Alerts", L"NewPlayer", alert_new_player);
         write_bool(path, L"Alerts", L"Approach", alert_approach);

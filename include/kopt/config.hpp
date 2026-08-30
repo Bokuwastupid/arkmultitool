@@ -87,6 +87,7 @@ namespace kopt
         bool show_radar{};
         bool show_threat_panel{true};
         bool structure_grouping{true};
+        bool structure_whitelist_enabled{};
         bool show_tracers{false};
         bool offscreen_arrows{true};
         bool esp_show_enemies{true};
@@ -162,6 +163,8 @@ namespace kopt
         std::wstring hidden_dino_types;
         std::wstring hidden_structure_types;
         std::wstring grouped_structure_types;
+        std::wstring selected_structure_types;
+        std::wstring known_structure_types;
 
         bool alerts_enabled{};
         bool alert_new_player{true};

@@ -113,6 +113,12 @@ Assert-True ($overlaySource.Contains('feature_catalog()') -and
     $overlaySource.Contains('update_feature_hotkeys(Settings& settings)') -and
     $overlaySource.Contains('draw_hotkey_list(const Settings& settings')) `
     'Universal feature binds or active hotkey list is missing'
+Assert-True ($overlaySource.Contains('Use selected structure list') -and
+    $overlaySource.Contains('exact_token_contains(settings.selected_structure_types') -and
+    $overlaySource.Contains('structure_catalog_')) 'Searchable exact structure catalog filter is missing'
+Assert-True ($overlaySource.Contains('profile_delete_confirmation_') -and
+    $overlaySource.Contains('std::filesystem::remove(selected_profile')) `
+    'Protected local-profile deletion workflow is missing'
 Assert-True ($payloadSource.Contains('g_overlay.update_feature_hotkeys(g_settings)')) `
     'Universal feature binds are not updated from the payload loop'
 Assert-True ($payloadSource.Contains('g_polled_left_down.store(false') -and $payloadSource.Contains('sided_modifier_key')) 'Pointer/modifier input reset guard is missing'
