@@ -115,6 +115,8 @@ namespace kopt
         bool local_valid{};
         bool aim_armed{};
         bool aim_active{};
+        bool player_aim_active{};
+        bool dino_aim_active{};
         std::uintptr_t aim_target{};
         double world_time{};
         std::uint64_t captures{};
@@ -308,8 +310,13 @@ namespace kopt
         bool aim_toggle_active_{};
         bool aim_key_was_down_{};
         bool aim_key_armed_{};
+        bool dino_aim_toggle_active_{};
+        bool dino_aim_key_was_down_{};
+        bool dino_aim_key_armed_{};
         std::uint32_t last_aim_key_{};
+        std::uint32_t last_dino_aim_key_{};
         std::int32_t last_aim_activation_mode_{-1};
+        std::int32_t last_dino_aim_activation_mode_{-1};
         bool last_player_aim_{};
         bool last_dino_aim_{};
         bool last_menu_open_{true};

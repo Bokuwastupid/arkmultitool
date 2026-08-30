@@ -546,6 +546,7 @@ namespace kopt
                 locked_target_ = 0;
                 locked_target_occluded_seconds_ = 0.0F;
                 aim_toggle_active_ = false;
+                dino_aim_toggle_active_ = false;
                 sway_state_ = {};
                 freecam_was_enabled_ = false;
                 freecam_pov_ = 0;
@@ -619,6 +620,9 @@ namespace kopt
             aim_toggle_active_ = false;
             aim_key_was_down_ = false;
             aim_key_armed_ = false;
+            dino_aim_toggle_active_ = false;
+            dino_aim_key_was_down_ = false;
+            dino_aim_key_armed_ = false;
             sway_state_ = {};
             freecam_was_enabled_ = false;
             freecam_pov_ = 0;
@@ -1493,17 +1497,32 @@ namespace kopt
     void ArkRuntime::run_aim(Settings& settings, const float delta_seconds)
     {
         snapshot_.aim_active = false;
+        snapshot_.player_aim_active = false;
+        snapshot_.dino_aim_active = false;
         snapshot_.aim_target = 0;
-        const bool aim_enable_changed = last_player_aim_ != settings.player_aim || last_dino_aim_ != settings.dino_aim;
+        const bool player_aim_enable_changed = last_player_aim_ != settings.player_aim;
+        const bool dino_aim_enable_changed = last_dino_aim_ != settings.dino_aim;
         const bool menu_just_closed = last_menu_open_ && !settings.menu_open;
         if (last_aim_key_ != settings.aim_key || last_aim_activation_mode_ != settings.aim_activation_mode ||
-            aim_enable_changed || menu_just_closed)
+            player_aim_enable_changed || menu_just_closed)
         {
             last_aim_key_ = settings.aim_key;
             last_aim_activation_mode_ = settings.aim_activation_mode;
             aim_key_was_down_ = false;
             aim_key_armed_ = false;
             aim_toggle_active_ = false;
+            locked_target_ = 0;
+            locked_target_occluded_seconds_ = 0.0F;
+        }
+        if (last_dino_aim_key_ != settings.dino_aim_key ||
+            last_dino_aim_activation_mode_ != settings.dino_aim_activation_mode ||
+            dino_aim_enable_changed || menu_just_closed)
+        {
+            last_dino_aim_key_ = settings.dino_aim_key;
+            last_dino_aim_activation_mode_ = settings.dino_aim_activation_mode;
+            dino_aim_key_was_down_ = false;
+            dino_aim_key_armed_ = false;
+            dino_aim_toggle_active_ = false;
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
         }
@@ -1519,28 +1538,49 @@ namespace kopt
             aim_key_was_down_ = false;
             aim_key_armed_ = false;
             aim_toggle_active_ = false;
+            dino_aim_key_was_down_ = false;
+            dino_aim_key_armed_ = false;
+            dino_aim_toggle_active_ = false;
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
             snapshot_.aim_armed = false;
             return;
         }
-        const bool key_down = (GetAsyncKeyState(static_cast<int>(settings.aim_key)) & 0x8000) != 0;
-        if (!key_down) aim_key_armed_ = true;
-        snapshot_.aim_armed = aim_key_armed_;
-        const bool key_pressed = key_down && !aim_key_was_down_ && aim_key_armed_;
-        aim_key_was_down_ = key_down;
-        if (settings.aim_activation_mode == 1 && key_pressed) aim_toggle_active_ = !aim_toggle_active_;
-        const bool activated = settings.aim_activation_mode == 0 ? (key_down && aim_key_armed_) :
-            settings.aim_activation_mode == 1 ? aim_toggle_active_ : true;
+        const auto activation = [](const bool enabled, const std::uint32_t key, const std::int32_t mode,
+            bool& was_down, bool& armed, bool& toggle_active) {
+            if (!enabled) return false;
+            const bool down = (GetAsyncKeyState(static_cast<int>(key)) & 0x8000) != 0;
+            if (!down) armed = true;
+            const bool pressed = down && !was_down && armed;
+            was_down = down;
+            if (mode == 1 && pressed) toggle_active = !toggle_active;
+            return mode == 0 ? down && armed : mode == 1 ? toggle_active : true;
+        };
+        const bool player_activated = activation(settings.player_aim, settings.aim_key,
+            settings.aim_activation_mode, aim_key_was_down_, aim_key_armed_, aim_toggle_active_);
+        const bool dino_activated = activation(settings.dino_aim, settings.dino_aim_key,
+            settings.dino_aim_activation_mode, dino_aim_key_was_down_, dino_aim_key_armed_,
+            dino_aim_toggle_active_);
+        snapshot_.player_aim_active = player_activated;
+        snapshot_.dino_aim_active = dino_activated;
+        snapshot_.aim_armed = (settings.player_aim && aim_key_armed_) ||
+            (settings.dino_aim && dino_aim_key_armed_);
         if ((!settings.player_aim && !settings.dino_aim) || settings.menu_open || !snapshot_.local_valid ||
-            !snapshot_.camera.valid || !activated)
+            !snapshot_.camera.valid || (!player_activated && !dino_activated))
         {
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
             if ((!settings.player_aim && !settings.dino_aim) || settings.menu_open || !snapshot_.local_valid)
             {
                 aim_toggle_active_ = false;
-                if (settings.menu_open && key_down) aim_key_armed_ = false;
+                dino_aim_toggle_active_ = false;
+                if (settings.menu_open)
+                {
+                    if ((GetAsyncKeyState(static_cast<int>(settings.aim_key)) & 0x8000) != 0)
+                        aim_key_armed_ = false;
+                    if ((GetAsyncKeyState(static_cast<int>(settings.dino_aim_key)) & 0x8000) != 0)
+                        dino_aim_key_armed_ = false;
+                }
             }
             return;
         }
@@ -1660,8 +1700,8 @@ namespace kopt
         };
         const auto eligible = [&](const Actor& actor) {
             if (actor.dead || actor.stale_seconds > 0.0F ||
-                (actor.kind == ActorKind::player && !settings.player_aim) ||
-                (actor.kind == ActorKind::dino && !settings.dino_aim) ||
+                (actor.kind == ActorKind::player && !player_activated) ||
+                (actor.kind == ActorKind::dino && !dino_activated) ||
                 (actor.kind != ActorKind::player && actor.kind != ActorKind::dino)) return false;
             const bool allied = (snapshot_.local_team != 0 && actor.team == snapshot_.local_team) ||
                 settings.is_allied(actor.team);

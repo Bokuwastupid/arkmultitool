@@ -17,9 +17,19 @@ namespace kopt
         float a{1.0F};
     };
 
+    struct FeatureBinding
+    {
+        std::wstring id;
+        std::uint32_t key{};
+        std::int32_t mode{}; // 0 = Hold, 1 = Toggle
+        bool show_in_list{true};
+    };
+
     struct Settings
     {
         bool menu_open{true};
+        float menu_width{780.0F};
+        float menu_height{600.0F};
 
         bool player_aim{false};
         bool dino_aim{false};
@@ -30,6 +40,7 @@ namespace kopt
         bool aim_lock{true};
         bool aim_draw_fov{true};
         std::int32_t aim_activation_mode{};
+        std::int32_t dino_aim_activation_mode{};
         std::int32_t aim_hitbox_mode{};
         std::int32_t aim_hitbox{};
         std::int32_t aim_point_method{};
@@ -46,6 +57,9 @@ namespace kopt
         float prediction_latency_ms{};
         float random_shot_chance{0.35F};
         std::uint32_t aim_key{VK_RBUTTON};
+        std::uint32_t dino_aim_key{VK_RBUTTON};
+        bool aim_bind_show{true};
+        bool dino_aim_bind_show{true};
 
         bool esp_enabled{true};
         bool player_esp{true};
@@ -184,6 +198,9 @@ namespace kopt
         float chams_budget{128.0F};
 
         bool debug_panel{true};
+        bool show_hotkey_list{true};
+        float hotkey_list_x{0.82F};
+        float hotkey_list_y{0.18F};
         std::uint32_t control_rotation_offset{0x490};
         std::uint32_t menu_key{VK_HOME};
         std::uint32_t unload_key{VK_END};
@@ -206,11 +223,14 @@ namespace kopt
         Color local_chams_color{0.64F, 0.24F, 1.0F, 1.0F};
 
         std::vector<std::int32_t> allied_teams;
+        std::vector<FeatureBinding> feature_bindings;
 
         void normalize();
         bool load(const std::filesystem::path& path);
         bool save(const std::filesystem::path& path) const;
         [[nodiscard]] bool is_allied(std::int32_t team) const;
         void set_allied(std::int32_t team, bool allied);
+        FeatureBinding* find_feature_binding(const std::wstring& id);
+        [[nodiscard]] const FeatureBinding* find_feature_binding(const std::wstring& id) const;
     };
 }

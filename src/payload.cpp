@@ -711,6 +711,12 @@ namespace
                 g_polled_left_down.store(false, std::memory_order_release);
                 g_menu_pointer_armed.store(true, std::memory_order_release);
                 return 0;
+            case WM_RBUTTONDOWN:
+                store_pointer_position(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
+                g_input.right_pressed.store(true, std::memory_order_release);
+                return 0;
+            case WM_RBUTTONUP:
+                return 0;
             case WM_MOUSEWHEEL:
                 g_input.wheel.fetch_add(GET_WHEEL_DELTA_WPARAM(wparam));
                 return 0;
@@ -720,8 +726,6 @@ namespace
             case WM_SYSKEYDOWN:
             case WM_SYSKEYUP:
             case WM_CHAR:
-            case WM_RBUTTONDOWN:
-            case WM_RBUTTONUP:
             case WM_MBUTTONDOWN:
             case WM_MBUTTONUP:
                 return 0;
@@ -855,6 +859,7 @@ namespace
                     delta_seconds = std::chrono::duration<float>(now - g_last_frame).count();
                 g_last_frame = now;
                 g_settings.normalize();
+                g_overlay.update_feature_hotkeys(g_settings);
                 g_runtime.update(g_settings, delta_seconds);
                 const auto& snapshot = g_runtime.snapshot();
                 if (snapshot.world_generation != g_logged_world_generation)

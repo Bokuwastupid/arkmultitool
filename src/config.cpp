@@ -8,7 +8,7 @@
 
 namespace
 {
-    constexpr std::uint32_t settings_schema_version = 16U;
+    constexpr std::uint32_t settings_schema_version = 18U;
 
     bool read_bool(const std::filesystem::path& path, const wchar_t* section,
         const wchar_t* key, const bool fallback)
@@ -45,7 +45,9 @@ namespace
     std::wstring read_string(const std::filesystem::path& path, const wchar_t* section,
         const wchar_t* key)
     {
-        std::array<wchar_t, 2048> value{};
+        // Feature bindings are serialized into one INI value. Keep enough room for
+        // a complete catalog instead of silently truncating larger configurations.
+        std::array<wchar_t, 16384> value{};
         GetPrivateProfileStringW(section, key, L"", value.data(), static_cast<DWORD>(value.size()), path.c_str());
         return value.data();
     }
@@ -103,10 +105,25 @@ namespace kopt
 {
     void Settings::normalize()
     {
+        menu_width = std::clamp(menu_width, 760.0F, 1800.0F);
+        menu_height = std::clamp(menu_height, 480.0F, 1400.0F);
         aim_fov = std::clamp(aim_fov, 1.0F, 90.0F);
         aim_distance_m = std::clamp(aim_distance_m, 10.0F, 2500.0F);
         aim_smoothing = std::clamp(aim_smoothing, 1.0F, 40.0F);
         aim_activation_mode = std::clamp(aim_activation_mode, 0, 2);
+        dino_aim_activation_mode = std::clamp(dino_aim_activation_mode, 0, 2);
+        hotkey_list_x = std::clamp(hotkey_list_x, 0.05F, 0.95F);
+        hotkey_list_y = std::clamp(hotkey_list_y, 0.05F, 0.95F);
+        std::erase_if(feature_bindings, [](const FeatureBinding& binding) {
+            return binding.id.empty() || binding.id.size() > 96 || binding.key > 0xFFU;
+        });
+        std::vector<std::wstring> seen_bindings;
+        std::erase_if(feature_bindings, [&](FeatureBinding& binding) {
+            binding.mode = std::clamp(binding.mode, 0, 1);
+            if (std::find(seen_bindings.begin(), seen_bindings.end(), binding.id) != seen_bindings.end()) return true;
+            seen_bindings.push_back(binding.id);
+            return false;
+        });
         aim_hitbox_mode = std::clamp(aim_hitbox_mode, 0, 1);
         aim_hitbox = std::clamp(aim_hitbox, 0, 4);
         aim_point_method = std::clamp(aim_point_method, 0, 2);
@@ -197,6 +214,8 @@ namespace kopt
         }
 
         const auto loaded_schema_version = read_uint(path, L"Meta", L"SchemaVersion", 0U);
+        menu_width = read_float(path, L"Menu", L"Width", menu_width);
+        menu_height = read_float(path, L"Menu", L"Height", menu_height);
         player_aim = read_bool(path, L"Aim", L"PlayerAim", player_aim);
         dino_aim = read_bool(path, L"Aim", L"DinoAim", dino_aim);
         aim_target_enemies = read_bool(path, L"Aim", L"TargetEnemies", aim_target_enemies);
@@ -206,6 +225,8 @@ namespace kopt
         aim_lock = read_bool(path, L"Aim", L"LockTarget", aim_lock);
         aim_draw_fov = read_bool(path, L"Aim", L"DrawFov", aim_draw_fov);
         aim_activation_mode = static_cast<std::int32_t>(read_uint(path, L"Aim", L"ActivationMode", aim_activation_mode));
+        dino_aim_activation_mode = static_cast<std::int32_t>(
+            read_uint(path, L"Aim", L"DinoActivationMode", dino_aim_activation_mode));
         aim_hitbox_mode = static_cast<std::int32_t>(read_uint(path, L"Aim", L"HitboxMode", aim_hitbox_mode));
         aim_hitbox = static_cast<std::int32_t>(read_uint(path, L"Aim", L"Hitbox", aim_hitbox));
         aim_point_method = static_cast<std::int32_t>(read_uint(path, L"Aim", L"PointMethod", aim_point_method));
@@ -222,6 +243,9 @@ namespace kopt
         prediction_latency_ms = read_float(path, L"Aim", L"PredictionLatencyMs", prediction_latency_ms);
         random_shot_chance = read_float(path, L"Aim", L"RandomChance", random_shot_chance);
         aim_key = read_uint(path, L"Aim", L"Key", aim_key);
+        dino_aim_key = read_uint(path, L"Aim", L"DinoKey", dino_aim_key);
+        aim_bind_show = read_bool(path, L"Aim", L"ShowPlayerBind", aim_bind_show);
+        dino_aim_bind_show = read_bool(path, L"Aim", L"ShowDinoBind", dino_aim_bind_show);
 
         esp_enabled = read_bool(path, L"ESP", L"Enabled", esp_enabled);
         player_esp = read_bool(path, L"ESP", L"Players", player_esp);
@@ -372,6 +396,24 @@ namespace kopt
         local_chams_color = read_color(path, L"LocalChams", local_chams_color);
 
         debug_panel = read_bool(path, L"Runtime", L"DebugPanel", debug_panel);
+        show_hotkey_list = read_bool(path, L"Hotkeys", L"ShowList", show_hotkey_list);
+        hotkey_list_x = read_float(path, L"Hotkeys", L"PositionX", hotkey_list_x);
+        hotkey_list_y = read_float(path, L"Hotkeys", L"PositionY", hotkey_list_y);
+        feature_bindings.clear();
+        std::wstringstream serialized_bindings(read_string(path, L"Hotkeys", L"FeatureBindings"));
+        std::wstring serialized_binding;
+        while (std::getline(serialized_bindings, serialized_binding, L';'))
+        {
+            if (serialized_binding.empty()) continue;
+            std::wstringstream fields(serialized_binding);
+            std::wstring id, key_text, mode_text, show_text;
+            if (!std::getline(fields, id, L',') || !std::getline(fields, key_text, L',') ||
+                !std::getline(fields, mode_text, L',') || !std::getline(fields, show_text, L',')) continue;
+            wchar_t* key_end{};
+            const auto key = std::wcstoul(key_text.c_str(), &key_end, 0);
+            feature_bindings.push_back({id, static_cast<std::uint32_t>(key),
+                static_cast<std::int32_t>(std::wcstol(mode_text.c_str(), nullptr, 10)), show_text != L"0"});
+        }
         control_rotation_offset = read_uint(path, L"Runtime", L"ControlRotationOffset", control_rotation_offset);
         menu_key = read_uint(path, L"Bindings", L"Menu", menu_key);
         unload_key = read_uint(path, L"Bindings", L"Unload", unload_key);
@@ -421,6 +463,8 @@ namespace kopt
     bool Settings::save(const std::filesystem::path& path) const
     {
         write_uint(path, L"Meta", L"SchemaVersion", settings_schema_version);
+        write_float(path, L"Menu", L"Width", menu_width);
+        write_float(path, L"Menu", L"Height", menu_height);
         write_bool(path, L"Aim", L"PlayerAim", player_aim);
         write_bool(path, L"Aim", L"DinoAim", dino_aim);
         write_bool(path, L"Aim", L"TargetEnemies", aim_target_enemies);
@@ -430,6 +474,7 @@ namespace kopt
         write_bool(path, L"Aim", L"LockTarget", aim_lock);
         write_bool(path, L"Aim", L"DrawFov", aim_draw_fov);
         write_uint(path, L"Aim", L"ActivationMode", static_cast<std::uint32_t>(aim_activation_mode));
+        write_uint(path, L"Aim", L"DinoActivationMode", static_cast<std::uint32_t>(dino_aim_activation_mode));
         write_uint(path, L"Aim", L"HitboxMode", static_cast<std::uint32_t>(aim_hitbox_mode));
         write_uint(path, L"Aim", L"Hitbox", static_cast<std::uint32_t>(aim_hitbox));
         write_uint(path, L"Aim", L"PointMethod", static_cast<std::uint32_t>(aim_point_method));
@@ -446,6 +491,9 @@ namespace kopt
         write_float(path, L"Aim", L"PredictionLatencyMs", prediction_latency_ms);
         write_float(path, L"Aim", L"RandomChance", random_shot_chance);
         write_uint(path, L"Aim", L"Key", aim_key);
+        write_uint(path, L"Aim", L"DinoKey", dino_aim_key);
+        write_bool(path, L"Aim", L"ShowPlayerBind", aim_bind_show);
+        write_bool(path, L"Aim", L"ShowDinoBind", dino_aim_bind_show);
 
         write_bool(path, L"ESP", L"Enabled", esp_enabled);
         write_bool(path, L"ESP", L"Players", player_esp);
@@ -595,6 +643,18 @@ namespace kopt
         write_color(path, L"LocalChams", local_chams_color);
 
         write_bool(path, L"Runtime", L"DebugPanel", debug_panel);
+        write_bool(path, L"Hotkeys", L"ShowList", show_hotkey_list);
+        write_float(path, L"Hotkeys", L"PositionX", hotkey_list_x);
+        write_float(path, L"Hotkeys", L"PositionY", hotkey_list_y);
+        std::wstring serialized_bindings;
+        for (const FeatureBinding& binding : feature_bindings)
+        {
+            if (binding.id.empty() || binding.key == 0) continue;
+            if (!serialized_bindings.empty()) serialized_bindings += L';';
+            serialized_bindings += binding.id + L"," + std::to_wstring(binding.key) + L"," +
+                std::to_wstring(binding.mode) + L"," + (binding.show_in_list ? L"1" : L"0");
+        }
+        write_value(path, L"Hotkeys", L"FeatureBindings", serialized_bindings);
         write_uint(path, L"Runtime", L"ControlRotationOffset", control_rotation_offset);
         write_uint(path, L"Bindings", L"Menu", menu_key);
         write_uint(path, L"Bindings", L"Unload", unload_key);
@@ -622,5 +682,21 @@ namespace kopt
         const auto found = std::lower_bound(allied_teams.begin(), allied_teams.end(), team);
         if (allied && (found == allied_teams.end() || *found != team)) allied_teams.insert(found, team);
         else if (!allied && found != allied_teams.end() && *found == team) allied_teams.erase(found);
+    }
+
+    FeatureBinding* Settings::find_feature_binding(const std::wstring& id)
+    {
+        const auto found = std::find_if(feature_bindings.begin(), feature_bindings.end(), [&](const auto& binding) {
+            return binding.id == id;
+        });
+        return found == feature_bindings.end() ? nullptr : &*found;
+    }
+
+    const FeatureBinding* Settings::find_feature_binding(const std::wstring& id) const
+    {
+        const auto found = std::find_if(feature_bindings.begin(), feature_bindings.end(), [&](const auto& binding) {
+            return binding.id == id;
+        });
+        return found == feature_bindings.end() ? nullptr : &*found;
     }
 }

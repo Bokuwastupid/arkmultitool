@@ -83,12 +83,16 @@ point `STEAM_COMPAT_DATA_PATH` at that prefix instead.
 
 - `Home` — open/close the menu.
 - `End` — restore hooks and unload the payload.
-- `RMB` — default aim activation; Hold/Toggle/Always modes are selectable.
+- `RMB` — default player and dino aim activation; each category has an independent key and Hold/Toggle/Always mode.
+- Right-click any checkbox or switch to add a keyboard or mouse bind and choose Hold/Toggle mode.
+- The `Hotkeys` tab shows every configured feature bind, its current state, list visibility and remove action.
+- The compact `ACTIVE HOTKEYS` window displays visible binds only while they are active; its position is configurable.
+- Drag the lower-right menu grip to resize it; the saved width and height are part of the local configuration.
 - `WASD` and `Q/E` or `Ctrl/Space` — move the free camera.
 - `Shift` — freecam sprint; mouse wheel changes its live speed.
 
-Settings are persisted beside the DLL in `kopt_internal.ini`. The first load
-creates the file automatically.
+Settings are persisted beside the DLL in `kopt_internal.ini`. Named local profiles
+are stored in the adjacent `profiles` folder. The first load creates the base file automatically.
 
 ## Troubleshooting
 

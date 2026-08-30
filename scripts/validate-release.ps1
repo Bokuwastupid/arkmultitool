@@ -94,6 +94,9 @@ foreach ($required in @(
     'No recoil',
     'No weapon sway',
     'Turret target lock',
+    'Dino aim activation',
+    'DinoActivationMode',
+    'DinoKey',
     'Aim activation entered fresh active state'
 )) {
     Assert-True ($unicode.Contains($required)) "Required runtime feature marker is missing: $required"
@@ -104,6 +107,14 @@ $payloadSource = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'src\payl
 $runtimeSource = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'src\runtime.cpp')
 $injectorSource = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'src\injector.cpp')
 Assert-True ($overlaySource.Contains('active_slider_ == 0') -and $overlaySource.Contains('consume_click(hit, input)')) 'Slider fresh-click capture guard is missing'
+Assert-True ($overlaySource.Contains('menu_resizing_') -and $overlaySource.Contains('combo_popup_') -and
+    $overlaySource.Contains('consume_right_click(row, input)')) 'Resizable menu, overlay combo or RMB bind context is missing'
+Assert-True ($overlaySource.Contains('feature_catalog()') -and
+    $overlaySource.Contains('update_feature_hotkeys(Settings& settings)') -and
+    $overlaySource.Contains('draw_hotkey_list(const Settings& settings')) `
+    'Universal feature binds or active hotkey list is missing'
+Assert-True ($payloadSource.Contains('g_overlay.update_feature_hotkeys(g_settings)')) `
+    'Universal feature binds are not updated from the payload loop'
 Assert-True ($payloadSource.Contains('g_polled_left_down.store(false') -and $payloadSource.Contains('sided_modifier_key')) 'Pointer/modifier input reset guard is missing'
 Assert-True ($payloadSource.Contains('g_menu_pointer_armed') -and
     $payloadSource.Contains('g_menu_pointer_armed.store(!left_down')) 'Menu carried-click release gate is missing'
@@ -113,6 +124,8 @@ Assert-True ($payloadSource.Contains('if (key == VK_LBUTTON)') -and
 Assert-True ($payloadSource.Contains('Freecam consumes the same physical controls as the pawn') -and
     $payloadSource.Contains('release_message') -and $payloadSource.Contains('allow_system_close')) 'Freecam pawn-input isolation is missing'
 Assert-True ($runtimeSource.Contains('aim_enable_changed') -and $runtimeSource.Contains('menu_just_closed')) 'Aim fresh-activation guard is missing'
+Assert-True ($runtimeSource.Contains('dino_activated') -and $runtimeSource.Contains('dino_aim_toggle_active_')) `
+    'Independent dino aim activation state is missing'
 Assert-True ($runtimeSource.Contains('snapshot_.world_address != active_world_') -and $runtimeSource.Contains('abandon_chams')) 'Reconnect-safe chams world guard is missing'
 Assert-True ($injectorSource.Contains($expectedGameHash) -and $injectorSource.Contains('loaded_payload') -and
     $injectorSource.Contains('KoptRequestUnload')) 'Injector build pin, duplicate-payload guard or unload contract is missing'

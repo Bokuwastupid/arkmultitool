@@ -9,9 +9,11 @@
 #include <d3dcompiler.h>
 #include <functional>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <numbers>
 #include <sstream>
+#include <string_view>
 #include <unordered_map>
 
 namespace
@@ -61,6 +63,128 @@ namespace
         }
         while (!safe.empty() && safe.back() == L'_') safe.pop_back();
         return safe;
+    }
+
+    struct FeatureDescriptor
+    {
+        const wchar_t* id;
+        const wchar_t* label;
+        const wchar_t* category;
+        bool kopt::Settings::* member;
+    };
+
+    const std::vector<FeatureDescriptor>& feature_catalog()
+    {
+        using S = kopt::Settings;
+        static const std::vector<FeatureDescriptor> catalog{
+            {L"aim.player", L"Player aim", L"Aim", &S::player_aim},
+            {L"aim.dino", L"Dino aim", L"Aim", &S::dino_aim},
+            {L"aim.enemies", L"Target enemies", L"Aim", &S::aim_target_enemies},
+            {L"aim.allies", L"Target allies", L"Aim", &S::aim_target_allies},
+            {L"aim.visibility", L"Visible targets only", L"Aim", &S::visibility_check},
+            {L"aim.lock", L"Lock selected target", L"Aim", &S::aim_lock},
+            {L"aim.fov_circle", L"Draw aim FOV", L"Aim", &S::aim_draw_fov},
+            {L"aim.prediction", L"Projectile prediction", L"Aim", &S::aim_prediction},
+            {L"esp.master", L"Master ESP", L"ESP", &S::esp_enabled},
+            {L"esp.players", L"Players", L"ESP", &S::player_esp},
+            {L"esp.dinos_tamed", L"Enemy / tamed dinosaurs", L"ESP", &S::enemy_dino_esp},
+            {L"esp.dinos_wild", L"Wild dinosaurs", L"ESP", &S::wild_dino_esp},
+            {L"esp.structures", L"Structures", L"ESP", &S::structure_esp},
+            {L"esp.turrets", L"Turrets", L"ESP", &S::turret_esp},
+            {L"esp.drops", L"Ground drops", L"ESP", &S::drop_esp},
+            {L"esp.death_caches", L"Death caches", L"ESP", &S::death_cache_esp},
+            {L"esp.player_caches", L"Player item caches", L"ESP", &S::player_item_cache_esp},
+            {L"esp.dino_caches", L"Dino item caches", L"ESP", &S::dino_item_cache_esp},
+            {L"esp.battle", L"Battle Mode", L"ESP", &S::battle_mode},
+            {L"esp.own_players", L"Own players", L"ESP relations", &S::esp_own_players},
+            {L"esp.allied_players", L"Allied players", L"ESP relations", &S::esp_allied_players},
+            {L"esp.enemy_players", L"Enemy players", L"ESP relations", &S::esp_enemy_players},
+            {L"esp.own_dinos", L"Own dinos", L"ESP relations", &S::esp_own_dinos},
+            {L"esp.allied_dinos", L"Allied dinos", L"ESP relations", &S::esp_allied_dinos},
+            {L"esp.enemy_dinos", L"Enemy dinos", L"ESP relations", &S::esp_enemy_dinos},
+            {L"esp.own_structures", L"Own structures", L"ESP relations", &S::esp_own_structures},
+            {L"esp.allied_structures", L"Allied structures", L"ESP relations", &S::esp_allied_structures},
+            {L"esp.enemy_structures", L"Enemy structures", L"ESP relations", &S::esp_enemy_structures},
+            {L"esp.neutral_structures", L"Neutral / world structures", L"ESP relations", &S::esp_neutral_structures},
+            {L"esp.awake", L"Show awake players", L"ESP states", &S::show_awake_players},
+            {L"esp.sleeping", L"Show sleeping players", L"ESP states", &S::show_sleeping_players},
+            {L"esp.knocked", L"Show knocked-out players", L"ESP states", &S::show_knocked_out_players},
+            {L"esp.dead", L"Show dead players", L"ESP states", &S::show_dead_players},
+            {L"esp.names", L"Names", L"ESP elements", &S::show_names},
+            {L"esp.tribes", L"Tribe labels", L"ESP elements", &S::show_tribes},
+            {L"esp.distance", L"Distance labels", L"ESP elements", &S::show_distance},
+            {L"esp.health", L"Health bars", L"ESP elements", &S::show_health},
+            {L"esp.torpor", L"Torpor bars", L"ESP elements", &S::show_torpor},
+            {L"esp.vitals", L"HP / Torpor values", L"ESP elements", &S::show_vital_values},
+            {L"esp.boxes", L"2D boxes", L"ESP elements", &S::show_boxes},
+            {L"esp.skeleton", L"Player skeleton", L"ESP elements", &S::show_skeleton},
+            {L"esp.tracers", L"Tracers", L"ESP elements", &S::show_tracers},
+            {L"esp.offscreen", L"Off-screen markers", L"ESP elements", &S::offscreen_arrows},
+            {L"esp.summary_structures", L"Structure summary", L"ESP summaries", &S::show_structure_summary},
+            {L"esp.summary_players", L"Player summary", L"ESP summaries", &S::show_player_summary},
+            {L"esp.summary_dinos", L"Tamed dino summary", L"ESP summaries", &S::show_dino_summary},
+            {L"esp.summary_filters", L"Summaries use ESP filters", L"ESP summaries", &S::summary_uses_filters},
+            {L"esp.player_labels", L"Player labels", L"ESP player", &S::show_player_labels},
+            {L"esp.player_status", L"Player status badge", L"ESP player", &S::show_player_status},
+            {L"esp.player_health", L"Player health", L"ESP player", &S::show_player_health},
+            {L"esp.player_torpor", L"Player torpor", L"ESP player", &S::show_player_torpor},
+            {L"esp.dino_labels", L"Dino labels", L"ESP world", &S::show_dino_labels},
+            {L"esp.dino_skeleton", L"Dino skeleton silhouettes", L"ESP world", &S::show_dino_skeleton},
+            {L"esp.dino_health", L"Dino health", L"ESP world", &S::show_dino_health},
+            {L"esp.dino_torpor", L"Dino torpor", L"ESP world", &S::show_dino_torpor},
+            {L"esp.structure_labels", L"Structure labels", L"ESP world", &S::show_structure_labels},
+            {L"esp.structure_health", L"Structure health", L"ESP world", &S::show_structure_health},
+            {L"esp.held_items", L"Held weapon icons", L"ESP gear", &S::show_held_items},
+            {L"esp.equipment", L"Armor icons + durability", L"ESP gear", &S::show_equipment},
+            {L"esp.compact", L"Compact multi-data labels", L"ESP gear", &S::compact_labels},
+            {L"esp.drop_quantity", L"Dropped item quantities", L"ESP gear", &S::show_drop_quantity},
+            {L"esp.turret_details", L"Turret ammo / state / settings", L"Turrets", &S::show_turret_details},
+            {L"esp.turret_ammo", L"Turret ammo", L"Turrets", &S::turret_show_ammo},
+            {L"esp.turret_state", L"Turret state", L"Turrets", &S::turret_show_state},
+            {L"esp.turret_power", L"Turret power", L"Turrets", &S::turret_show_power},
+            {L"esp.turret_range", L"Turret range", L"Turrets", &S::turret_show_range},
+            {L"esp.turret_target_mode", L"Turret target mode", L"Turrets", &S::turret_show_target_mode},
+            {L"esp.turret_target_lock", L"Turret target lock", L"Turrets", &S::turret_show_target_state},
+            {L"esp.turret_warning", L"Turret warning mode", L"Turrets", &S::turret_show_warning},
+            {L"esp.turret_filter", L"Hide non-matching turrets", L"Turrets", &S::turret_hide_nonmatching},
+            {L"esp.radar", L"Radar", L"Radar", &S::show_radar},
+            {L"esp.threat", L"Threat panel", L"Radar", &S::show_threat_panel},
+            {L"esp.grouping", L"Group dense structures", L"Radar", &S::structure_grouping},
+            {L"esp.declutter", L"Smart declutter", L"Radar", &S::smart_declutter},
+            {L"camera.freecam", L"Free camera", L"Camera", &S::freecam},
+            {L"camera.fov", L"FOV override", L"Camera", &S::fov_override},
+            {L"weapon.recoil", L"No recoil", L"Weapon", &S::no_recoil},
+            {L"weapon.sway", L"No weapon sway", L"Weapon", &S::no_sway},
+            {L"chams.local", L"First-person hands + weapon", L"Chams", &S::local_chams},
+            {L"alerts.master", L"Enable alerts", L"Alerts", &S::alerts_enabled},
+            {L"alerts.new_player", L"New enemy player", L"Alerts", &S::alert_new_player},
+            {L"alerts.approach", L"Enemy approaching", L"Alerts", &S::alert_approach},
+            {L"alerts.sleep", L"Enemy sleep transition", L"Alerts", &S::alert_sleep},
+            {L"alerts.death", L"Enemy death transition", L"Alerts", &S::alert_death},
+            {L"alerts.noglin", L"Noglin in radius", L"Alerts", &S::alert_noglin},
+            {L"alerts.turret", L"Active targeting turret", L"Alerts", &S::alert_turret},
+            {L"alerts.group", L"Enemy group (3+)", L"Alerts", &S::alert_enemy_group},
+            {L"alerts.sound", L"Notification sound", L"Alerts", &S::alert_sound},
+            {L"runtime.debug", L"Runtime debug panel", L"Runtime", &S::debug_panel},
+            {L"hotkeys.list", L"Show active bind list", L"Hotkeys", &S::show_hotkey_list}
+        };
+        return catalog;
+    }
+
+    const FeatureDescriptor* feature_descriptor(kopt::Settings& settings, const bool& value)
+    {
+        for (const FeatureDescriptor& descriptor : feature_catalog())
+            if (&(settings.*descriptor.member) == &value) return &descriptor;
+        return nullptr;
+    }
+
+    const FeatureDescriptor* feature_descriptor(const std::wstring& id)
+    {
+        const auto& catalog = feature_catalog();
+        const auto found = std::find_if(catalog.begin(), catalog.end(), [&](const auto& descriptor) {
+            return id == descriptor.id;
+        });
+        return found == catalog.end() ? nullptr : &*found;
     }
 
     bool token_list_contains(const std::wstring& list, const std::wstring& candidate)
@@ -381,9 +505,160 @@ namespace kopt
         if (settings.aim_draw_fov) draw_aim_overlay(settings, runtime);
         if (settings.esp_enabled) draw_esp(settings, runtime);
         if (settings.alerts_enabled) draw_alerts(settings, runtime);
+        if (settings.show_hotkey_list) draw_hotkey_list(settings, runtime);
         if (settings.menu_open) draw_menu(settings, runtime, input, settings_path);
         if (settings.debug_panel && !settings.menu_open) draw_debug(runtime);
         flush();
+    }
+
+    void Overlay::update_feature_hotkeys(Settings& settings)
+    {
+        DWORD foreground_process{};
+        const HWND foreground = GetForegroundWindow();
+        const bool accept_input = !settings.menu_open && foreground != nullptr &&
+            GetWindowThreadProcessId(foreground, &foreground_process) != 0 &&
+            foreground_process == GetCurrentProcessId();
+
+        for (auto iterator = feature_binding_runtime_.begin(); iterator != feature_binding_runtime_.end();)
+        {
+            if (settings.find_feature_binding(iterator->id) != nullptr)
+            {
+                ++iterator;
+                continue;
+            }
+            if (iterator->hold_applied)
+            {
+                if (const FeatureDescriptor* descriptor = feature_descriptor(iterator->id))
+                    settings.*descriptor->member = iterator->restore_value;
+            }
+            iterator = feature_binding_runtime_.erase(iterator);
+        }
+
+        for (FeatureBinding& binding : settings.feature_bindings)
+        {
+            if (binding.key == 0 || binding.id == L"aim.player" || binding.id == L"aim.dino") continue;
+            const FeatureDescriptor* descriptor = feature_descriptor(binding.id);
+            if (descriptor == nullptr) continue;
+            bool& value = settings.*descriptor->member;
+            auto state = std::find_if(feature_binding_runtime_.begin(), feature_binding_runtime_.end(),
+                [&](const auto& item) { return item.id == binding.id; });
+            if (state == feature_binding_runtime_.end())
+            {
+                feature_binding_runtime_.push_back({binding.id, binding.key, binding.mode});
+                state = std::prev(feature_binding_runtime_.end());
+            }
+            if (state->key != binding.key || state->mode != binding.mode)
+            {
+                if (state->hold_applied) value = state->restore_value;
+                *state = {binding.id, binding.key, binding.mode};
+            }
+            if (!accept_input)
+            {
+                if (state->hold_applied) value = state->restore_value;
+                state->was_down = false;
+                state->armed = false;
+                state->hold_applied = false;
+                state->active = binding.mode == 1 && value;
+                continue;
+            }
+            const bool down = (GetAsyncKeyState(static_cast<int>(binding.key)) & 0x8000) != 0;
+            if (!down) state->armed = true;
+            const bool pressed = down && !state->was_down && state->armed;
+            state->was_down = down;
+            if (binding.mode == 0)
+            {
+                if (down && state->armed && !state->hold_applied)
+                {
+                    state->restore_value = value;
+                    state->hold_applied = true;
+                }
+                if (down && state->armed) value = true;
+                else if (!down && state->hold_applied)
+                {
+                    value = state->restore_value;
+                    state->hold_applied = false;
+                }
+                state->active = down && state->armed;
+            }
+            else
+            {
+                if (state->hold_applied)
+                {
+                    value = state->restore_value;
+                    state->hold_applied = false;
+                }
+                if (pressed) value = !value;
+                state->active = value;
+            }
+        }
+    }
+
+    void Overlay::draw_hotkey_list(const Settings& settings, const ArkRuntime& runtime)
+    {
+        struct ActiveHotkey
+        {
+            std::wstring label;
+            std::wstring category;
+            std::uint32_t key{};
+            std::int32_t mode{};
+        };
+
+        std::vector<ActiveHotkey> active_hotkeys;
+        const Snapshot& snapshot = runtime.snapshot();
+        if (settings.aim_bind_show && snapshot.player_aim_active)
+            active_hotkeys.push_back({L"Player aim", L"Aim", settings.aim_key, settings.aim_activation_mode});
+        if (settings.dino_aim_bind_show && snapshot.dino_aim_active)
+            active_hotkeys.push_back({L"Dino aim", L"Aim", settings.dino_aim_key, settings.dino_aim_activation_mode});
+
+        for (const FeatureBinding& binding : settings.feature_bindings)
+        {
+            if (binding.key == 0 || !binding.show_in_list ||
+                binding.id == L"aim.player" || binding.id == L"aim.dino") continue;
+            const FeatureDescriptor* descriptor = feature_descriptor(binding.id);
+            if (descriptor == nullptr) continue;
+            const auto state = std::find_if(feature_binding_runtime_.begin(), feature_binding_runtime_.end(),
+                [&](const FeatureBindingRuntime& item) { return item.id == binding.id; });
+            if (state == feature_binding_runtime_.end() || !state->active) continue;
+            active_hotkeys.push_back({descriptor->label, descriptor->category, binding.key, binding.mode});
+        }
+
+        // Keep the widget compact and useful: it appears only while at least one
+        // visible bind is active, matching the usual competitive-overlay behavior.
+        if (active_hotkeys.empty()) return;
+        constexpr float list_width = 286.0F;
+        constexpr float header_height = 31.0F;
+        constexpr float row_height = 34.0F;
+        const float list_height = header_height + row_height * static_cast<float>(active_hotkeys.size());
+        const float left = std::clamp(width_ * settings.hotkey_list_x, 8.0F,
+            std::max(8.0F, width_ - list_width - 8.0F));
+        const float top = std::clamp(height_ * settings.hotkey_list_y, 8.0F,
+            std::max(8.0F, height_ - list_height - 8.0F));
+        const Rect frame{left, top, left + list_width, top + list_height};
+        fill(frame, {panel.r, panel.g, panel.b, 0.94F});
+        stroke(frame, accent_dim, 1.0F);
+        fill({frame.left, frame.top, frame.right, frame.top + 3.0F}, accent);
+        text(L"ACTIVE HOTKEYS", {frame.left + 12.0F, frame.top + 4.0F,
+            frame.right - 12.0F, frame.top + header_height}, text_primary, 11.0F);
+        text(std::to_wstring(active_hotkeys.size()), {frame.right - 42.0F, frame.top + 4.0F,
+            frame.right - 12.0F, frame.top + header_height}, accent, 11.0F, TextAlign::right);
+
+        static constexpr std::array<const wchar_t*, 3> modes{L"HOLD", L"TOGGLE", L"ALWAYS"};
+        float row_top = frame.top + header_height;
+        for (std::size_t index = 0; index < active_hotkeys.size(); ++index)
+        {
+            const ActiveHotkey& hotkey = active_hotkeys[index];
+            const Rect row{frame.left + 1.0F, row_top, frame.right - 1.0F, row_top + row_height};
+            if ((index & 1U) != 0) fill(row, {surface.r, surface.g, surface.b, 0.48F});
+            fill({row.left + 7.0F, row.top + 14.0F, row.left + 12.0F, row.top + 19.0F}, success);
+            text(hotkey.label, {row.left + 20.0F, row.top + 2.0F, row.right - 100.0F, row.top + 20.0F},
+                text_primary, 11.0F);
+            text(hotkey.category, {row.left + 20.0F, row.top + 17.0F, row.right - 100.0F, row.bottom - 1.0F},
+                text_secondary, 9.0F);
+            const std::int32_t mode = std::clamp(hotkey.mode, 0, 2);
+            text(key_name(hotkey.key) + L" · " + modes[static_cast<std::size_t>(mode)],
+                {row.right - 128.0F, row.top, row.right - 10.0F, row.bottom}, accent, 10.0F, TextAlign::right);
+            row_top += row_height;
+        }
     }
 
     void Overlay::draw_esp(const Settings& settings, const ArkRuntime& runtime)
@@ -1143,8 +1418,23 @@ namespace kopt
     void Overlay::draw_menu(Settings& settings, ArkRuntime& runtime, InputState& input,
         const std::filesystem::path& settings_path)
     {
-        const float menu_width = 780.0F;
-        const float menu_height = 600.0F;
+        settings_context_ = &settings;
+        if (open_combo_ != -1 && active_combo_rect_valid_ && input.frame_left_pressed &&
+            !contains(active_combo_rect_, input.frame_mouse_x, input.frame_mouse_y) &&
+            !contains(active_combo_control_rect_, input.frame_mouse_x, input.frame_mouse_y))
+        {
+            open_combo_ = -1;
+            active_combo_rect_valid_ = false;
+        }
+        combo_popup_ = {};
+        const float maximum_width = std::max(320.0F, width_ - 16.0F);
+        const float maximum_height = std::max(320.0F, height_ - 16.0F);
+        const float minimum_width = std::min(760.0F, maximum_width);
+        const float minimum_height = std::min(480.0F, maximum_height);
+        float menu_width = std::clamp(settings.menu_width, minimum_width, maximum_width);
+        float menu_height = std::clamp(settings.menu_height, minimum_height, maximum_height);
+        settings.menu_width = menu_width;
+        settings.menu_height = menu_height;
         if (!menu_position_initialized_)
         {
             menu_left_ = std::max(12.0F, (width_ - menu_width) * 0.5F);
@@ -1153,8 +1443,30 @@ namespace kopt
         }
         menu_left_ = std::clamp(menu_left_, 8.0F, std::max(8.0F, width_ - menu_width - 8.0F));
         menu_top_ = std::clamp(menu_top_, 8.0F, std::max(8.0F, height_ - menu_height - 8.0F));
+        Rect resize_region{menu_left_ + menu_width - 22.0F, menu_top_ + menu_height - 22.0F,
+            menu_left_ + menu_width, menu_top_ + menu_height};
+        if (!menu_dragging_ && !menu_resizing_ && consume_click(resize_region, input))
+        {
+            menu_resizing_ = true;
+            open_combo_ = -1;
+        }
+        if (menu_resizing_)
+        {
+            if (input.frame_left_down)
+            {
+                menu_width = std::clamp(static_cast<float>(input.frame_mouse_x) - menu_left_,
+                    minimum_width, maximum_width);
+                menu_height = std::clamp(static_cast<float>(input.frame_mouse_y) - menu_top_,
+                    minimum_height, maximum_height);
+                settings.menu_width = menu_width;
+                settings.menu_height = menu_height;
+            }
+            else menu_resizing_ = false;
+        }
+        menu_left_ = std::clamp(menu_left_, 8.0F, std::max(8.0F, width_ - menu_width - 8.0F));
+        menu_top_ = std::clamp(menu_top_, 8.0F, std::max(8.0F, height_ - menu_height - 8.0F));
         const Rect drag_region{menu_left_, menu_top_, menu_left_ + menu_width, menu_top_ + 72.0F};
-        if (!menu_dragging_ && consume_click(drag_region, input))
+        if (!menu_resizing_ && !menu_dragging_ && consume_click(drag_region, input))
         {
             menu_dragging_ = true;
             menu_drag_offset_x_ = static_cast<float>(input.frame_mouse_x) - menu_left_;
@@ -1177,6 +1489,7 @@ namespace kopt
         const float left = menu_left_;
         const float top = menu_top_;
         const Rect frame{left, top, left + menu_width, top + menu_height};
+        current_menu_bottom_ = frame.bottom;
         fill(frame, panel);
         stroke(frame, {0.220F, 0.145F, 0.365F, 1.0F}, 1.0F);
         fill({left, top, left + 188.0F, top + menu_height}, {0.025F, 0.018F, 0.037F, 0.99F});
@@ -1184,22 +1497,23 @@ namespace kopt
         text(L"KOPT", {left + 24.0F, top + 22.0F, left + 164.0F, top + 55.0F}, text_primary, 25.0F);
         text(L"INTERNAL / PROTON", {left + 24.0F, top + 54.0F, left + 170.0F, top + 76.0F}, accent, 10.0F);
 
-        static constexpr const wchar_t* tabs[]{L"Aim", L"ESP", L"Camera", L"Visuals", L"Chams", L"Bindings", L"Alerts"};
-        float tab_y = top + 102.0F;
-        for (int i = 0; i < 7; ++i)
+        static constexpr const wchar_t* tabs[]{L"Aim", L"ESP", L"Camera", L"Visuals", L"Chams", L"Bindings", L"Hotkeys", L"Alerts"};
+        float tab_y = top + 92.0F;
+        for (int i = 0; i < 8; ++i)
         {
             if (button(tabs[i], {left + 16.0F, tab_y, left + 172.0F, tab_y + 38.0F}, active_tab_ == i, input))
             {
                 active_tab_ = i;
                 open_combo_ = -1;
             }
-            tab_y += 44.0F;
+            tab_y += 40.0F;
         }
 
         text(key_name(settings.menu_key) + L"  Toggle menu", {left + 24.0F, top + menu_height - 66.0F, left + 180.0F, top + menu_height - 45.0F}, text_secondary, 11.0F);
         text(key_name(settings.unload_key) + L"  Unload payload", {left + 24.0F, top + menu_height - 43.0F, left + 180.0F, top + menu_height - 22.0F}, text_secondary, 11.0F);
 
         const float content_left = left + 220.0F;
+        content_width_ = std::max(480.0F, frame.right - 28.0F - content_left);
         float y = top + 78.0F;
         text(tabs[active_tab_], {content_left, top + 24.0F, frame.right - 24.0F, top + 58.0F}, text_primary, 24.0F);
         line(content_left, top + 62.0F, frame.right - 28.0F, top + 62.0F, {0.220F, 0.145F, 0.365F, 1.0F});
@@ -1220,10 +1534,8 @@ namespace kopt
             y += 48.0F;
             if (active_aim_section_ == 0)
             {
-                static constexpr const wchar_t* modes[]{L"Hold", L"Toggle", L"Always"};
                 checkbox(L"Player aim", settings.player_aim, content_left, y, input);
                 checkbox(L"Dino aim", settings.dino_aim, content_left, y, input);
-                combo(L"Activation", settings.aim_activation_mode, modes, std::size(modes), 1, content_left, y, input);
                 checkbox(L"Lock selected target", settings.aim_lock, content_left, y, input);
                 checkbox(L"Draw aim FOV", settings.aim_draw_fov, content_left, y, input);
                 text(runtime.snapshot().local_mounted ? L"Mounted controller route: active" : L"Mounted controller route: ready",
@@ -1768,6 +2080,7 @@ namespace kopt
             keybind(L"Menu toggle", settings.menu_key, BindingTarget::menu, content_left, y, input);
             keybind(L"Unload DLL", settings.unload_key, BindingTarget::unload, content_left, y, input);
             keybind(L"Aim activation", settings.aim_key, BindingTarget::aim, content_left, y, input);
+            keybind(L"Dino aim activation", settings.dino_aim_key, BindingTarget::dino_aim, content_left, y, input);
             keybind(L"Freecam toggle", settings.freecam_key, BindingTarget::freecam, content_left, y, input);
             keybind(L"ESP toggle", settings.esp_toggle_key, BindingTarget::esp_toggle, content_left, y, input);
             keybind(L"Panic / restore", settings.panic_key, BindingTarget::panic, content_left, y, input);
@@ -1778,6 +2091,91 @@ namespace kopt
                 settings.save(settings_path);
                 toast_ = L"Bindings saved";
                 toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            }
+        }
+        else if (active_tab_ == 6)
+        {
+            checkbox(L"Show active bind list", settings.show_hotkey_list, content_left, y, input);
+            slider(L"List horizontal position", settings.hotkey_list_x, 0.05F, 0.95F, content_left, y, input);
+            slider(L"List vertical position", settings.hotkey_list_y, 0.05F, 0.95F, content_left, y, input);
+            text(L"CONFIGURED HOTKEYS", {content_left + 2.0F, y, frame.right - 32.0F, y + 24.0F}, accent, 11.0F);
+            y += 28.0F;
+
+            struct HotkeyEntry
+            {
+                std::wstring id;
+                std::wstring label;
+                std::wstring category;
+                std::uint32_t key{};
+                std::int32_t mode{};
+                bool active{};
+                bool shown{};
+                bool special{};
+            };
+            std::vector<HotkeyEntry> entries;
+            entries.push_back({L"aim.player", L"Player aim", L"Aim", settings.aim_key,
+                settings.aim_activation_mode, runtime.snapshot().player_aim_active, settings.aim_bind_show, true});
+            entries.push_back({L"aim.dino", L"Dino aim", L"Aim", settings.dino_aim_key,
+                settings.dino_aim_activation_mode, runtime.snapshot().dino_aim_active, settings.dino_aim_bind_show, true});
+            for (const FeatureBinding& binding : settings.feature_bindings)
+            {
+                if (binding.key == 0) continue;
+                const FeatureDescriptor* descriptor = feature_descriptor(binding.id);
+                if (descriptor == nullptr) continue;
+                const auto state = std::find_if(feature_binding_runtime_.begin(), feature_binding_runtime_.end(),
+                    [&](const auto& item) { return item.id == binding.id; });
+                entries.push_back({binding.id, descriptor->label, descriptor->category, binding.key, binding.mode,
+                    state != feature_binding_runtime_.end() && state->active, binding.show_in_list, false});
+            }
+            constexpr int entries_per_page = 6;
+            const int page_count = std::max(1, static_cast<int>((entries.size() + entries_per_page - 1) / entries_per_page));
+            hotkey_page_ = std::clamp(hotkey_page_, 0, page_count - 1);
+            const int begin = hotkey_page_ * entries_per_page;
+            const int end = std::min(static_cast<int>(entries.size()), begin + entries_per_page);
+            if (entries.empty())
+            {
+                text(L"No feature binds yet. Right-click any checkbox or switch to add one.",
+                    {content_left + 2.0F, y, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
+                y += 48.0F;
+            }
+            for (int index = begin; index < end; ++index)
+            {
+                const HotkeyEntry& entry = entries[static_cast<std::size_t>(index)];
+                const Rect row{content_left, y, content_left + content_width_, y + 44.0F};
+                fill(row, entry.active ? Color{accent_dim.r, accent_dim.g, accent_dim.b, 0.72F} : surface);
+                fill({row.left, row.top, row.left + 3.0F, row.bottom}, entry.active ? success : accent_dim);
+                text(entry.label, {row.left + 12.0F, row.top + 3.0F, row.left + 245.0F, row.top + 24.0F},
+                    text_primary, 12.0F);
+                text(entry.category + L" · " + key_name(entry.key) + L" · " +
+                    (entry.mode == 0 ? L"Hold" : entry.mode == 1 ? L"Toggle" : L"Always"),
+                    {row.left + 12.0F, row.top + 22.0F, row.left + 350.0F, row.bottom - 2.0F},
+                    text_secondary, 10.0F);
+                if (button(entry.shown ? L"Eye" : L"Hidden",
+                    {row.right - 158.0F, row.top + 7.0F, row.right - 82.0F, row.bottom - 7.0F}, entry.shown, input))
+                {
+                    if (entry.id == L"aim.player") settings.aim_bind_show = !settings.aim_bind_show;
+                    else if (entry.id == L"aim.dino") settings.dino_aim_bind_show = !settings.dino_aim_bind_show;
+                    else if (FeatureBinding* binding = settings.find_feature_binding(entry.id))
+                        binding->show_in_list = !binding->show_in_list;
+                }
+                if (!entry.special && button(L"Remove",
+                    {row.right - 76.0F, row.top + 7.0F, row.right - 8.0F, row.bottom - 7.0F}, false, input))
+                {
+                    const std::wstring id = entry.id;
+                    std::erase_if(settings.feature_bindings, [&](const FeatureBinding& binding) { return binding.id == id; });
+                    checkbox_binding_feature_id_.clear();
+                    break;
+                }
+                y += 50.0F;
+            }
+            if (page_count > 1)
+            {
+                if (button(L"Previous", {content_left, y, content_left + 110.0F, y + 32.0F}, true, input))
+                    hotkey_page_ = (hotkey_page_ + page_count - 1) % page_count;
+                if (button(L"Next", {content_left + 120.0F, y, content_left + 230.0F, y + 32.0F}, true, input))
+                    hotkey_page_ = (hotkey_page_ + 1) % page_count;
+                text(std::to_wstring(hotkey_page_ + 1) + L" / " + std::to_wstring(page_count),
+                    {content_left + 250.0F, y, frame.right - 32.0F, y + 32.0F}, text_secondary, 11.0F);
             }
         }
         else
@@ -1821,6 +2219,27 @@ namespace kopt
             runtime.snapshot().local_valid ? success : warning, 12.0F);
         if (!toast_.empty() && std::chrono::steady_clock::now() < toast_until_)
             text(toast_, {frame.right - 220.0F, top + 28.0F, frame.right - 30.0F, top + 55.0F}, success, 12.0F, TextAlign::right);
+        if (combo_popup_.visible)
+        {
+            fill(combo_popup_.rect, {0.025F, 0.018F, 0.037F, 0.995F});
+            stroke(combo_popup_.rect, accent, 1.0F);
+            for (std::size_t index = 0; index < combo_popup_.count; ++index)
+            {
+                const Rect option{combo_popup_.rect.left + 2.0F,
+                    combo_popup_.rect.top + 2.0F + static_cast<float>(index) * 30.0F,
+                    combo_popup_.rect.right - 2.0F,
+                    combo_popup_.rect.top + 30.0F + static_cast<float>(index) * 30.0F};
+                const bool selected = combo_popup_.selected == static_cast<std::int32_t>(index);
+                const bool hovered = contains(option, input.frame_mouse_x, input.frame_mouse_y);
+                fill(option, selected ? accent_dim : (hovered ? surface_hover : surface));
+                if (selected) fill({option.left, option.top, option.left + 3.0F, option.bottom}, accent);
+                text(combo_popup_.options[index], {option.left + 12.0F, option.top,
+                    option.right - 8.0F, option.bottom}, selected ? text_primary : text_secondary, 12.0F);
+            }
+        }
+        const Rect grip{frame.right - 20.0F, frame.bottom - 20.0F, frame.right - 5.0F, frame.bottom - 5.0F};
+        line(grip.left + 4.0F, grip.bottom, grip.right, grip.top + 4.0F, accent_dim, 1.5F);
+        line(grip.left + 9.0F, grip.bottom, grip.right, grip.top + 9.0F, accent, 1.5F);
     }
 
     void Overlay::draw_esp_preview(Settings& settings, const float x, const float y, InputState& input)
@@ -2262,11 +2681,12 @@ namespace kopt
 
     bool Overlay::toggle(const std::wstring& label, bool& value, const float x, float& y, InputState& input)
     {
-        const Rect row{x, y, x + 510.0F, y + 34.0F};
+        const Rect row{x, y, x + content_width_, y + 34.0F};
         const bool hovered = contains(row, input.frame_mouse_x, input.frame_mouse_y);
         if (hovered) fill(row, {surface_hover.r, surface_hover.g, surface_hover.b, 0.45F});
-        text(label, {x + 2.0F, y, x + 400.0F, y + 34.0F}, text_primary, 13.0F);
-        const Rect switch_rect{x + 450.0F, y + 7.0F, x + 496.0F, y + 27.0F};
+        text(label, {x + 2.0F, y, x + content_width_ - 110.0F, y + 34.0F}, text_primary, 13.0F);
+        const Rect switch_rect{x + content_width_ - 60.0F, y + 7.0F,
+            x + content_width_ - 14.0F, y + 27.0F};
         fill(switch_rect, value ? accent_dim : surface);
         const float knob = value ? switch_rect.right - 16.0F : switch_rect.left + 4.0F;
         fill({knob, switch_rect.top + 4.0F, knob + 12.0F, switch_rect.bottom - 4.0F}, value ? accent : text_secondary);
@@ -2277,23 +2697,132 @@ namespace kopt
             changed = true;
         }
         y += 38.0F;
+        feature_binding_context(value, row, x, y, input);
         return changed;
     }
 
     bool Overlay::checkbox(const std::wstring& label, bool& value, const float x, float& y, InputState& input)
     {
-        const Rect row{x, y, x + 510.0F, y + 28.0F};
+        const Rect row{x, y, x + content_width_, y + 28.0F};
         const bool hovered = contains(row, input.frame_mouse_x, input.frame_mouse_y);
         if (hovered) fill(row, {surface_hover.r, surface_hover.g, surface_hover.b, 0.42F});
         const Rect box{x + 2.0F, y + 5.0F, x + 20.0F, y + 23.0F};
         fill(box, value ? accent_dim : surface);
         stroke(box, value ? accent : text_secondary);
         if (value) fill({box.left + 5.0F, box.top + 5.0F, box.right - 5.0F, box.bottom - 5.0F}, accent);
-        text(label, {x + 31.0F, y, x + 500.0F, y + 28.0F}, text_primary, 13.0F);
+        text(label, {x + 31.0F, y, x + content_width_ - 10.0F, y + 28.0F}, text_primary, 13.0F);
         const bool changed = consume_click(row, input);
         if (changed) value = !value;
         y += 32.0F;
+        feature_binding_context(value, row, x, y, input);
         return changed;
+    }
+
+    void Overlay::feature_binding_context(bool& value, const Rect& row, const float x, float& y, InputState& input)
+    {
+        if (settings_context_ == nullptr) return;
+        const FeatureDescriptor* descriptor = feature_descriptor(*settings_context_, value);
+        if (descriptor == nullptr) return;
+
+        const bool player_aim = std::wstring_view(descriptor->id) == L"aim.player";
+        const bool dino_aim = std::wstring_view(descriptor->id) == L"aim.dino";
+        FeatureBinding* binding = settings_context_->find_feature_binding(descriptor->id);
+        std::uint32_t key = player_aim ? settings_context_->aim_key :
+            dino_aim ? settings_context_->dino_aim_key : binding != nullptr ? binding->key : 0U;
+        std::int32_t mode = player_aim ? settings_context_->aim_activation_mode :
+            dino_aim ? settings_context_->dino_aim_activation_mode : binding != nullptr ? binding->mode : 0;
+        bool show = player_aim ? settings_context_->aim_bind_show :
+            dino_aim ? settings_context_->dino_aim_bind_show : binding != nullptr && binding->show_in_list;
+        static constexpr std::array<const wchar_t*, 3> mode_names{L"Hold", L"Toggle", L"Always"};
+        if (key != 0)
+            text(key_name(key) + L" · " + mode_names[static_cast<std::size_t>(std::clamp(mode, 0, 2))],
+                {row.left + 220.0F, row.top, row.right - 12.0F, row.bottom},
+                checkbox_binding_feature_id_ == descriptor->id ? accent : text_secondary,
+                11.0F, TextAlign::right);
+        else
+            text(L"RMB to bind", {row.left + 220.0F, row.top, row.right - 12.0F, row.bottom},
+                checkbox_binding_feature_id_ == descriptor->id ? accent : text_secondary,
+                11.0F, TextAlign::right);
+
+        if (consume_right_click(row, input))
+        {
+            if (checkbox_binding_feature_id_ == descriptor->id)
+            {
+                checkbox_binding_feature_id_.clear();
+            }
+            else
+            {
+                checkbox_binding_feature_id_ = descriptor->id;
+                if (!player_aim && !dino_aim && binding == nullptr)
+                {
+                    settings_context_->feature_bindings.push_back({descriptor->id, 0U, 0, true});
+                    binding = &settings_context_->feature_bindings.back();
+                }
+                open_combo_ = -1;
+                active_combo_rect_valid_ = false;
+            }
+        }
+        if (checkbox_binding_feature_id_ != descriptor->id) return;
+
+        binding = settings_context_->find_feature_binding(descriptor->id);
+        key = player_aim ? settings_context_->aim_key : dino_aim ? settings_context_->dino_aim_key :
+            binding != nullptr ? binding->key : 0U;
+        mode = player_aim ? settings_context_->aim_activation_mode : dino_aim ?
+            settings_context_->dino_aim_activation_mode : binding != nullptr ? binding->mode : 0;
+        show = player_aim ? settings_context_->aim_bind_show : dino_aim ? settings_context_->dino_aim_bind_show :
+            binding != nullptr && binding->show_in_list;
+
+        const float card_height = 126.0F;
+        const Rect card{x + 14.0F, y, x + content_width_ - 8.0F, y + card_height};
+        fill(card, {surface.r, surface.g, surface.b, 0.98F});
+        stroke(card, accent_dim);
+        text(std::wstring(L"BIND · ") + descriptor->category,
+            {card.left + 12.0F, card.top + 5.0F, card.right - 12.0F, card.top + 26.0F}, accent, 10.0F);
+        const BindingTarget target = player_aim ? BindingTarget::aim :
+            dino_aim ? BindingTarget::dino_aim : BindingTarget::feature;
+        const bool waiting = binding_target_ == target &&
+            (target != BindingTarget::feature || binding_feature_id_ == descriptor->id);
+        const Rect bind_rect{card.left + 12.0F, card.top + 28.0F, card.right - 12.0F, card.top + 60.0F};
+        if (button(waiting ? L"Press any key or mouse button..." :
+            key == 0 ? L"Add keybind" : key_name(key), bind_rect, waiting, input))
+        {
+            binding_target_ = target;
+            binding_feature_id_ = descriptor->id;
+            input.captured_key.store(0, std::memory_order_relaxed);
+            input.binding_capture.store(true, std::memory_order_release);
+        }
+
+        const int mode_count = player_aim || dino_aim ? 3 : 2;
+        const float mode_width = (card.right - card.left - 30.0F) / static_cast<float>(mode_count);
+        for (int index = 0; index < mode_count; ++index)
+        {
+            const float left = card.left + 12.0F + static_cast<float>(index) * (mode_width + 3.0F);
+            if (button(mode_names[static_cast<std::size_t>(index)],
+                {left, card.top + 66.0F, left + mode_width, card.top + 96.0F}, mode == index, input))
+            {
+                mode = index;
+                if (player_aim) settings_context_->aim_activation_mode = mode;
+                else if (dino_aim) settings_context_->dino_aim_activation_mode = mode;
+                else if (binding != nullptr) binding->mode = mode;
+            }
+        }
+        const Rect list_button{card.left + 12.0F, card.top + 101.0F, card.left + 172.0F, card.bottom - 5.0F};
+        if (button(show ? L"Eye · shown" : L"Eye · hidden", list_button, show, input))
+        {
+            show = !show;
+            if (player_aim) settings_context_->aim_bind_show = show;
+            else if (dino_aim) settings_context_->dino_aim_bind_show = show;
+            else if (binding != nullptr) binding->show_in_list = show;
+        }
+        if (!player_aim && !dino_aim && binding != nullptr &&
+            button(L"Remove bind", {card.right - 150.0F, card.top + 101.0F,
+                card.right - 12.0F, card.bottom - 5.0F}, false, input))
+        {
+            const std::wstring id = descriptor->id;
+            std::erase_if(settings_context_->feature_bindings, [&](const FeatureBinding& item) { return item.id == id; });
+            checkbox_binding_feature_id_.clear();
+        }
+        y += card_height + 8.0F;
     }
 
     bool Overlay::combo(const std::wstring& label, std::int32_t& value, const wchar_t* const* options,
@@ -2301,8 +2830,9 @@ namespace kopt
     {
         if (options == nullptr || count == 0) return false;
         value = std::clamp(value, 0, static_cast<std::int32_t>(count - 1));
-        text(label, {x + 2.0F, y, x + 250.0F, y + 34.0F}, text_primary, 13.0F);
-        const Rect control{x + 270.0F, y + 1.0F, x + 500.0F, y + 33.0F};
+        const float control_left = x + std::min(270.0F, content_width_ * 0.52F);
+        text(label, {x + 2.0F, y, control_left - 14.0F, y + 34.0F}, text_primary, 13.0F);
+        const Rect control{control_left, y + 1.0F, x + content_width_ - 10.0F, y + 33.0F};
         bool changed{};
         if (button(std::wstring(options[value]) + (open_combo_ == id ? L"  ^" : L"  v"),
             control, open_combo_ == id, input))
@@ -2310,18 +2840,32 @@ namespace kopt
         y += 38.0F;
         if (open_combo_ == id)
         {
+            const float popup_height = static_cast<float>(count) * 30.0F + 4.0F;
+            float popup_top = control.bottom + 2.0F;
+            if (popup_top + popup_height > current_menu_bottom_ - 12.0F)
+                popup_top = control.top - popup_height - 2.0F;
+            const Rect popup{control.left, popup_top, control.right, popup_top + popup_height};
+            active_combo_rect_ = popup;
+            active_combo_control_rect_ = control;
+            active_combo_rect_valid_ = true;
             for (std::size_t index = 0; index < count; ++index)
             {
-                const Rect option{x + 270.0F, y, x + 500.0F, y + 28.0F};
-                if (button(options[index], option, value == static_cast<std::int32_t>(index), input))
+                const Rect option{popup.left + 2.0F, popup.top + 2.0F + static_cast<float>(index) * 30.0F,
+                    popup.right - 2.0F, popup.top + 30.0F + static_cast<float>(index) * 30.0F};
+                if (!input.frame_click_consumed && input.frame_left_pressed &&
+                    contains(option, input.frame_mouse_x, input.frame_mouse_y))
                 {
+                    input.frame_click_consumed = true;
                     value = static_cast<std::int32_t>(index);
                     open_combo_ = -1;
+                    active_combo_rect_valid_ = false;
                     changed = true;
                 }
-                y += 30.0F;
             }
+            if (open_combo_ == id)
+                combo_popup_ = {true, options, count, value, popup};
         }
+        else if (open_combo_ == -1) active_combo_rect_valid_ = false;
         y += 6.0F;
         return changed;
     }
@@ -2329,10 +2873,11 @@ namespace kopt
     bool Overlay::slider(const std::wstring& label, float& value, const float minimum, const float maximum,
         const float x, float& y, InputState& input, const wchar_t* suffix)
     {
-        text(label, {x + 2.0F, y, x + 340.0F, y + 25.0F}, text_primary, 13.0F);
-        text(fixed(value, value < 2.0F ? 2 : 0) + suffix, {x + 360.0F, y, x + 500.0F, y + 25.0F},
+        text(label, {x + 2.0F, y, x + content_width_ - 170.0F, y + 25.0F}, text_primary, 13.0F);
+        text(fixed(value, value < 2.0F ? 2 : 0) + suffix,
+            {x + content_width_ - 150.0F, y, x + content_width_ - 10.0F, y + 25.0F},
             accent, 12.0F, TextAlign::right);
-        const Rect track{x + 2.0F, y + 28.0F, x + 500.0F, y + 34.0F};
+        const Rect track{x + 2.0F, y + 28.0F, x + content_width_ - 10.0F, y + 34.0F};
         fill(track, surface);
         float ratio = (value - minimum) / (maximum - minimum);
         ratio = std::clamp(ratio, 0.0F, 1.0F);
@@ -2359,8 +2904,8 @@ namespace kopt
     bool Overlay::text_input(const std::wstring& label, std::wstring& value, const int id,
         const float x, float& y, InputState& input, const std::size_t maximum)
     {
-        text(label, {x + 2.0F, y, x + 500.0F, y + 24.0F}, text_primary, 12.0F);
-        const Rect field{x + 2.0F, y + 25.0F, x + 500.0F, y + 59.0F};
+        text(label, {x + 2.0F, y, x + content_width_ - 10.0F, y + 24.0F}, text_primary, 12.0F);
+        const Rect field{x + 2.0F, y + 25.0F, x + content_width_ - 10.0F, y + 59.0F};
         const bool active = active_text_input_ == id;
         fill(field, active ? surface_hover : surface);
         stroke(field, active ? accent : accent_dim);
@@ -2405,12 +2950,13 @@ namespace kopt
     bool Overlay::keybind(const std::wstring& label, std::uint32_t& value, const BindingTarget target,
         const float x, float& y, InputState& input)
     {
-        const Rect row{x, y, x + 510.0F, y + 40.0F};
+        const Rect row{x, y, x + content_width_, y + 40.0F};
         const bool hovered = contains(row, input.frame_mouse_x, input.frame_mouse_y);
         if (hovered) fill(row, {surface_hover.r, surface_hover.g, surface_hover.b, 0.45F});
-        text(label, {x + 2.0F, y, x + 285.0F, y + 40.0F}, text_primary, 13.0F);
+        text(label, {x + 2.0F, y, x + content_width_ - 225.0F, y + 40.0F}, text_primary, 13.0F);
         const bool waiting = binding_target_ == target;
-        const Rect bind_rect{x + 310.0F, y + 4.0F, x + 500.0F, y + 36.0F};
+        const Rect bind_rect{x + content_width_ - 200.0F, y + 4.0F,
+            x + content_width_ - 10.0F, y + 36.0F};
         if (button(waiting ? L"Press a key..." : key_name(value), bind_rect, waiting, input))
         {
             binding_target_ = target;
@@ -2430,27 +2976,39 @@ namespace kopt
         if (captured == VK_ESCAPE)
         {
             binding_target_ = BindingTarget::none;
+            binding_feature_id_.clear();
             toast_ = L"Rebind cancelled";
             toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             return;
         }
 
         std::uint32_t* target{};
+        FeatureBinding* feature_binding{};
         switch (binding_target_)
         {
         case BindingTarget::menu: target = &settings.menu_key; break;
         case BindingTarget::unload: target = &settings.unload_key; break;
         case BindingTarget::aim: target = &settings.aim_key; break;
+        case BindingTarget::dino_aim: target = &settings.dino_aim_key; break;
+        case BindingTarget::feature:
+            feature_binding = settings.find_feature_binding(binding_feature_id_);
+            if (feature_binding == nullptr && !binding_feature_id_.empty())
+            {
+                settings.feature_bindings.push_back({binding_feature_id_, 0U, 0, true});
+                feature_binding = &settings.feature_bindings.back();
+            }
+            if (feature_binding != nullptr) target = &feature_binding->key;
+            break;
         case BindingTarget::freecam: target = &settings.freecam_key; break;
         case BindingTarget::esp_toggle: target = &settings.esp_toggle_key; break;
         case BindingTarget::panic: target = &settings.panic_key; break;
         default: break;
         }
+        // Feature binds may intentionally share a key (for example a raid preset),
+        // but lifecycle controls remain reserved so a feature cannot hide the menu,
+        // unload the payload or trigger panic on the same press.
         const bool conflict = target != &settings.menu_key && settings.menu_key == captured ||
-            target != &settings.unload_key && settings.unload_key == captured ||
-            target != &settings.aim_key && settings.aim_key == captured ||
-            target != &settings.freecam_key && settings.freecam_key == captured ||
-            target != &settings.esp_toggle_key && settings.esp_toggle_key == captured;
+            target != &settings.unload_key && settings.unload_key == captured;
         const bool panic_conflict = target != &settings.panic_key && settings.panic_key == captured;
         if (target != nullptr && !conflict && !panic_conflict)
         {
@@ -2462,6 +3020,7 @@ namespace kopt
             toast_ = L"Binding is already in use";
         }
         binding_target_ = BindingTarget::none;
+        binding_feature_id_.clear();
         toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     }
 
@@ -2469,7 +3028,17 @@ namespace kopt
     {
         if (input.frame_click_consumed || !input.frame_left_pressed ||
             !contains(rect, input.frame_mouse_x, input.frame_mouse_y)) return false;
+        if (open_combo_ != -1 && active_combo_rect_valid_ &&
+            contains(active_combo_rect_, input.frame_mouse_x, input.frame_mouse_y)) return false;
         input.frame_click_consumed = true;
+        return true;
+    }
+
+    bool Overlay::consume_right_click(const Rect& rect, InputState& input) const
+    {
+        if (input.frame_right_click_consumed || !input.frame_right_pressed ||
+            !contains(rect, input.frame_mouse_x, input.frame_mouse_y)) return false;
+        input.frame_right_click_consumed = true;
         return true;
     }
 
