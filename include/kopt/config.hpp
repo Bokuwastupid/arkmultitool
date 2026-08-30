@@ -1,0 +1,216 @@
+#pragma once
+
+#include <windows.h>
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+namespace kopt
+{
+    struct Color
+    {
+        float r{};
+        float g{};
+        float b{};
+        float a{1.0F};
+    };
+
+    struct Settings
+    {
+        bool menu_open{true};
+
+        bool player_aim{false};
+        bool dino_aim{false};
+        bool aim_target_enemies{true};
+        bool aim_target_allies{false};
+        bool visibility_check{true};
+        bool random_hitbox{false};
+        bool aim_lock{true};
+        bool aim_draw_fov{true};
+        std::int32_t aim_activation_mode{};
+        std::int32_t aim_hitbox_mode{};
+        std::int32_t aim_hitbox{};
+        std::int32_t aim_point_method{};
+        std::uint32_t aim_hitbox_mask{0xFFU};
+        std::int32_t aim_priority{};
+        float aim_fov{12.0F};
+        float aim_distance_m{500.0F};
+        float aim_smoothing{5.0F};
+        float mounted_aim_fov{14.0F};
+        float mounted_aim_smoothing{6.0F};
+        bool aim_prediction{};
+        float projectile_velocity_mps{300.0F};
+        float projectile_gravity_mps2{9.81F};
+        float prediction_latency_ms{};
+        float random_shot_chance{0.35F};
+        std::uint32_t aim_key{VK_RBUTTON};
+
+        bool esp_enabled{true};
+        bool player_esp{true};
+        bool enemy_dino_esp{true};
+        bool wild_dino_esp{false};
+        bool structure_esp{true};
+        bool turret_esp{true};
+        bool drop_esp{false};
+        bool death_cache_esp{false};
+        bool player_item_cache_esp{true};
+        bool dino_item_cache_esp{true};
+        bool show_names{true};
+        bool show_tribes{true};
+        bool show_distance{true};
+        bool show_health{true};
+        bool show_torpor{true};
+        bool show_vital_values{true};
+        bool show_boxes{true};
+        bool show_skeleton{false};
+        bool show_dino_skeleton{false};
+        bool show_held_items{true};
+        bool show_equipment{true};
+        bool show_turret_details{true};
+        bool show_drop_quantity{true};
+        bool show_radar{};
+        bool show_threat_panel{true};
+        bool structure_grouping{true};
+        bool show_tracers{false};
+        bool offscreen_arrows{true};
+        bool esp_show_enemies{true};
+        bool esp_show_allies{false};
+        bool esp_own_players{};
+        bool esp_allied_players{};
+        bool esp_enemy_players{true};
+        bool esp_own_dinos{};
+        bool esp_allied_dinos{};
+        bool esp_enemy_dinos{true};
+        bool esp_own_structures{};
+        bool esp_allied_structures{};
+        bool esp_enemy_structures{true};
+        bool esp_neutral_structures{true};
+        bool show_awake_players{true};
+        bool show_sleeping_players{true};
+        bool show_knocked_out_players{true};
+        bool show_dead_players{};
+        bool show_player_status{true};
+        bool show_player_labels{true};
+        bool show_dino_labels{true};
+        bool show_structure_labels{true};
+        bool show_player_health{true};
+        bool show_dino_health{true};
+        bool show_structure_health{true};
+        bool show_player_torpor{true};
+        bool show_dino_torpor{true};
+        bool compact_labels{true};
+        bool turret_show_ammo{true};
+        bool turret_show_state{true};
+        bool turret_show_power{true};
+        bool turret_show_range{true};
+        bool turret_show_target_mode{true};
+        bool turret_show_target_state{true};
+        bool turret_show_warning{};
+        bool turret_hide_nonmatching{};
+        std::int32_t turret_target_filter{-1};
+        bool battle_mode{};
+        bool smart_declutter{};
+        bool show_structure_summary{};
+        bool show_player_summary{};
+        bool show_dino_summary{};
+        bool summary_uses_filters{true};
+        std::int32_t esp_box_style{};
+        std::int32_t player_color_source{};
+        std::int32_t esp_label_side{};
+        std::int32_t esp_health_side{1};
+        std::int32_t esp_torpor_side{2};
+        std::int32_t esp_status_side{3};
+        std::int32_t world_box_style{};
+        std::int32_t world_label_side{};
+        std::int32_t world_health_side{1};
+        std::int32_t world_torpor_side{2};
+        float esp_opacity{1.0F};
+        float esp_box_thickness{1.5F};
+        float esp_skeleton_thickness{1.2F};
+        float esp_label_size{13.0F};
+        float esp_icon_size{30.0F};
+        float radar_size{180.0F};
+        float radar_range_m{300.0F};
+        float threat_distance_m{300.0F};
+        float radar_x{0.86F};
+        float radar_y{0.20F};
+        float structure_group_radius_m{12.0F};
+        float esp_distance_m{700.0F};
+        float esp_detail_distance_m{5000.0F};
+        float drop_distance_m{5000.0F};
+        float refresh_interval_ms{33.0F};
+        float discovery_interval_ms{1000.0F};
+        float discovery_budget_ms{8.0F};
+        std::wstring esp_search;
+        std::wstring hidden_tribes;
+        std::wstring hidden_dino_types;
+        std::wstring hidden_structure_types;
+        std::wstring grouped_structure_types;
+
+        bool alerts_enabled{};
+        bool alert_new_player{true};
+        bool alert_approach{true};
+        bool alert_sleep{true};
+        bool alert_death{true};
+        bool alert_noglin{true};
+        bool alert_turret{true};
+        bool alert_enemy_group{true};
+        bool alert_sound{};
+        float alert_radius_m{250.0F};
+        float alert_noglin_radius_m{120.0F};
+        float alert_approach_speed_mps{10.0F};
+        float alert_lifetime_s{7.0F};
+        float alert_cooldown_s{8.0F};
+
+        bool freecam{false};
+        float freecam_speed{1200.0F};
+        float freecam_sprint_multiplier{3.0F};
+        float freecam_vertical_multiplier{1.0F};
+        float freecam_smoothing{0.12F};
+        float freecam_mouse_sensitivity{0.08F};
+        bool fov_override{false};
+        float camera_fov{112.5F};
+        bool no_recoil{false};
+        bool no_sway{false};
+
+        bool local_chams{};
+        std::int32_t local_chams_style{};
+        bool enemy_chams{};
+        bool chams_players{true};
+        bool chams_dinos{true};
+        float chams_distance_m{400.0F};
+        float chams_budget{128.0F};
+
+        bool debug_panel{true};
+        std::uint32_t control_rotation_offset{0x490};
+        std::uint32_t menu_key{VK_HOME};
+        std::uint32_t unload_key{VK_END};
+        std::uint32_t freecam_key{VK_F6};
+        std::uint32_t esp_toggle_key{VK_F7};
+        std::uint32_t panic_key{VK_F12};
+
+        Color own_color{0.29F, 0.90F, 0.62F, 1.0F};
+        Color ally_color{0.29F, 0.68F, 1.0F, 1.0F};
+        Color enemy_color{1.0F, 0.31F, 0.38F, 1.0F};
+        Color player_awake_color{0.29F, 0.90F, 0.62F, 1.0F};
+        Color player_sleeping_color{0.38F, 0.62F, 1.0F, 1.0F};
+        Color player_knocked_out_color{1.0F, 0.72F, 0.30F, 1.0F};
+        Color player_dead_color{0.92F, 0.22F, 0.34F, 1.0F};
+        Color wild_color{1.0F, 0.72F, 0.30F, 1.0F};
+        Color structure_color{0.35F, 0.78F, 1.0F, 1.0F};
+        Color health_color{0.28F, 0.92F, 0.42F, 1.0F};
+        Color torpor_color{0.30F, 0.66F, 1.0F, 1.0F};
+        Color menu_accent_color{0.545F, 0.361F, 0.965F, 1.0F};
+        Color local_chams_color{0.64F, 0.24F, 1.0F, 1.0F};
+
+        std::vector<std::int32_t> allied_teams;
+
+        void normalize();
+        bool load(const std::filesystem::path& path);
+        bool save(const std::filesystem::path& path) const;
+        [[nodiscard]] bool is_allied(std::int32_t team) const;
+        void set_allied(std::int32_t team, bool allied);
+    };
+}

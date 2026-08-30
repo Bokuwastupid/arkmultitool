@@ -1,0 +1,39 @@
+# Native and managed build output
+/build/
+/build-msvc/
+/output/
+/loader/dist/
+**/bin/
+**/obj/
+*.exe
+*.dll
+*.pdb
+*.lib
+*.obj
+*.exp
+*.ilk
+
+# Local runtime state and credentials
+/backend/local-runtime/
+/data-protection/
+/.vs/
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Per-machine payload configuration
+kopt_internal.ini
+kopt_internal.ini.*
+profiles/
+
+# IDE and OS files
+*.user
+*.suo
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

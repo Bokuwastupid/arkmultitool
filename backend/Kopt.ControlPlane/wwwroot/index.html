@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>KOPT Control Plane</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <main id="login" class="login-shell">
+    <section class="login-card glass">
+      <div class="brand-mark">K</div>
+      <p class="eyebrow">SECURE CONTROL PLANE</p>
+      <h1>Welcome back</h1>
+      <p class="muted">Manage access, devices, releases and incidents.</p>
+      <form id="login-form">
+        <label>Email<input id="email" type="email" autocomplete="username" required></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" minlength="12" required></label>
+        <button class="primary" type="submit"><span>Sign in</span><i></i></button>
+        <p id="login-error" class="error" role="alert"></p>
+      </form>
+    </section>
+  </main>
+
+  <div id="app" class="app-shell hidden">
+    <aside class="sidebar glass">
+      <div class="brand"><div class="brand-mark small">K</div><div><b>KOPT</b><span>CONTROL PLANE</span></div></div>
+      <nav id="nav">
+        <button data-view="overview" class="active">Overview</button>
+        <button data-view="users">Users</button>
+        <button data-view="keys">License keys</button>
+        <button data-view="releases">Releases</button>
+        <button data-view="incidents">Tamper incidents</button>
+        <button data-view="audit">Audit trail</button>
+      </nav>
+      <div class="sidebar-bottom"><span class="status-dot"></span><span>Backend connected</span><button id="logout">Log out</button></div>
+    </aside>
+    <section class="workspace">
+      <header><div><p class="eyebrow">ADMINISTRATION</p><h2 id="view-title">Overview</h2></div><div class="header-actions"><span id="clock"></span><button id="refresh" class="icon-button" aria-label="Refresh">↻</button></div></header>
+      <div id="notice" class="notice hidden"></div>
+      <section id="overview" class="view active">
+        <div id="metrics" class="metrics skeleton"></div>
+        <div class="split-grid">
+          <article class="panel"><div class="panel-head"><div><p class="eyebrow">SYSTEM</p><h3>Product state</h3></div><span class="pill good">Operational</span></div><div class="state-list"><div><span>Authorization</span><b>Healthy</b></div><div><span>Lease service</span><b>Healthy</b></div><div><span>Release signing</span><b>Configured</b></div><div><span>Database</span><b>Connected</b></div></div></article>
+          <article class="panel"><div class="panel-head"><div><p class="eyebrow">QUICK ACTION</p><h3>Generate license batch</h3></div></div><form id="key-form" class="compact-form"><label>Product<select id="product-id" required></select></label><div class="form-row"><label>Count<input id="key-count" type="number" value="1" min="1" max="100"></label><label>Days<input id="key-days" type="number" value="30" min="1" max="3650"></label><label>Slots<input id="key-slots" type="number" value="1" min="1" max="20"></label></div><label>Reason<input id="key-reason" value="Admin sale"></label><button class="primary" type="submit">Generate once</button></form></article>
+        </div>
+      </section>
+      <section id="users" class="view"><div class="toolbar"><input id="user-search" placeholder="Search email"><button id="user-search-button">Search</button></div><div class="table-panel"><table><thead><tr><th>User</th><th>ID</th><th>Status</th><th>Actions</th></tr></thead><tbody id="users-body"></tbody></table></div></section>
+      <section id="keys" class="view"><div class="table-panel"><table><thead><tr><th>Key ID</th><th>Days</th><th>Slots</th><th>Created</th><th>State</th><th>Actions</th></tr></thead><tbody id="keys-body"></tbody></table></div></section>
+      <section id="releases" class="view"><div class="split-grid release-grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">SIGNED DELIVERY</p><h3>Publish release</h3></div></div><form id="release-form" class="compact-form"><label>Product<select id="release-product" required></select></label><div class="form-row"><label>Channel<input id="release-channel" value="stable" maxlength="32" required></label><label>Version<input id="release-version" placeholder="1.0.0" maxlength="64" required></label><label>Minimum loader<input id="release-min-loader" placeholder="1.0.0" maxlength="64" required></label></div><label>HTTPS manifest URI<input id="release-uri" type="url" placeholder="https://cdn.example/manifest.json" required></label><label>Manifest SHA-256<input id="release-sha" minlength="64" maxlength="64" required></label><label>Manifest signature (base64)<textarea id="release-signature" rows="3" required></textarea></label><div class="form-row"><label>Rollout %<input id="release-rollout" type="number" value="100" min="0" max="100"></label><label>Reason<input id="release-reason" value="Release publish" required></label></div><label>Changelog<textarea id="release-changelog" rows="3"></textarea></label><label>Known issues<textarea id="release-known-issues" rows="2"></textarea></label><button class="primary" type="submit">Publish signed metadata</button></form></article><article><div class="table-panel"><table><thead><tr><th>Version</th><th>Channel</th><th>Rollout</th><th>Published</th><th>State</th><th>Actions</th></tr></thead><tbody id="releases-body"></tbody></table></div></article></div></section>
+      <section id="incidents" class="view"><div class="table-panel"><table><thead><tr><th>Incident</th><th>Code</th><th>Risk</th><th>Created</th><th>State</th><th>Actions</th></tr></thead><tbody id="incidents-body"></tbody></table></div></section>
+      <section id="audit" class="view"><div class="table-panel"><table><thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Reason</th></tr></thead><tbody id="audit-body"></tbody></table></div></section>
+    </section>
+  </div>
+  <dialog id="keys-dialog"><div class="dialog-head"><div><p class="eyebrow">SHOW ONCE</p><h3>Generated keys</h3></div><button id="close-dialog">×</button></div><p class="muted">Copy these now. Only hashes are stored by the backend.</p><pre id="generated-keys"></pre><button id="copy-keys" class="primary">Copy all</button></dialog>
+  <dialog id="user-dialog" class="wide-dialog"><div class="dialog-head"><div><p class="eyebrow">USER CONTROL</p><h3 id="user-title">User</h3><p id="user-status" class="muted"></p></div><button id="close-user-dialog">×</button></div><label>Required audit reason<input id="user-reason" placeholder="Sale, support ticket or incident ID"></label><div class="dialog-actions"><button id="user-logout" class="table-action">Force logout</button><button id="user-quarantine" class="table-action danger">Quarantine</button></div><h4>Subscriptions</h4><div class="table-panel"><table><thead><tr><th>Product</th><th>Ends</th><th>Slots</th><th>State</th><th>Actions</th></tr></thead><tbody id="user-subscriptions"></tbody></table></div><h4>Devices / HWID slots</h4><div class="table-panel"><table><thead><tr><th>Device</th><th>Last seen</th><th>State</th><th>Actions</th></tr></thead><tbody id="user-devices"></tbody></table></div></dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

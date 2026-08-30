@@ -1,0 +1,193 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Kopt.Loader.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        x:Class="Kopt.Loader.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        mc:Ignorable="d"
+        d:DesignWidth="1120" d:DesignHeight="720"
+        Width="1120" Height="720" MinWidth="900" MinHeight="620"
+        WindowStartupLocation="CenterScreen"
+        WindowDecorations="None"
+        Title="KOPT Loader">
+
+    <Grid RowDefinitions="42,*" Background="#09070D">
+        <Border Grid.Row="0" Background="#0D0912" BorderBrush="#261C31" BorderThickness="0,0,0,1"
+                PointerPressed="TitleBar_PointerPressed">
+            <Grid ColumnDefinitions="*,42,42">
+                <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
+                    <Border Width="22" Height="22" CornerRadius="6" Background="#8B5CF6">
+                        <TextBlock Text="K" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   FontWeight="Bold" Foreground="White" />
+                    </Border>
+                    <TextBlock Text="KOPT" FontWeight="Bold" VerticalAlignment="Center" />
+                    <TextBlock Text="SECURE LOADER" Classes="eyebrow" VerticalAlignment="Center" />
+                </StackPanel>
+                <Button Grid.Column="1" Content="—" Background="Transparent" Click="Minimize_Click"
+                        CornerRadius="0" Padding="0" />
+                <Button Grid.Column="2" Content="×" Background="Transparent" Click="Close_Click"
+                        CornerRadius="0" Padding="0" />
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1" IsVisible="{Binding IsLoginVisible}">
+            <Ellipse Width="620" Height="620" Fill="#2B1659" Opacity="0.2"
+                     HorizontalAlignment="Left" VerticalAlignment="Top" Margin="-280,-340,0,0" />
+            <Grid ColumnDefinitions="1.1*,0.9*" Margin="64">
+                <StackPanel VerticalAlignment="Center" MaxWidth="520" Spacing="18">
+                    <TextBlock Text="PRIVATE CONTROL PLANE" Classes="eyebrow" />
+                    <TextBlock Text="One clean path from license to game." FontSize="40" FontWeight="Bold"
+                               TextWrapping="Wrap" LineHeight="46" />
+                    <TextBlock Classes="muted" FontSize="16" TextWrapping="Wrap" LineHeight="24"
+                               Text="Version-pinned target validation, device leases, signed release state and controlled payload lifecycle for ARK: Survival Evolved." />
+                    <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,16,0,0">
+                        <Border Classes="card" Padding="14,10"><TextBlock Text="NO TOKEN LOGS" Classes="eyebrow" /></Border>
+                        <Border Classes="card" Padding="14,10"><TextBlock Text="EXACT BUILD PIN" Classes="eyebrow" /></Border>
+                    </StackPanel>
+                </StackPanel>
+
+                <Border Grid.Column="1" Classes="card" Width="390" Padding="30" HorizontalAlignment="Center"
+                        VerticalAlignment="Center">
+                    <StackPanel Spacing="14">
+                        <TextBlock Text="Sign in" FontSize="27" FontWeight="Bold" />
+                        <TextBlock Text="Credentials are exchanged with the control plane and kept in memory only."
+                                   Classes="muted" TextWrapping="Wrap" Margin="0,0,0,8" />
+                        <TextBlock Text="EMAIL" Classes="eyebrow" />
+                        <TextBox Text="{Binding Email}" PlaceholderText="name@example.com" />
+                        <TextBlock Text="PASSWORD" Classes="eyebrow" Margin="0,5,0,0" />
+                        <TextBox Text="{Binding Password}" PasswordChar="●" PlaceholderText="Password" />
+                        <TextBlock Text="{Binding LoginMessage}" Foreground="#FB7185" TextWrapping="Wrap" MinHeight="18" />
+                        <Button Content="Authorize device" Classes="primary" Command="{Binding LoginCommand}"
+                                HorizontalContentAlignment="Center" IsEnabled="{Binding !IsBusy}" />
+                        <TextBlock Text="{Binding ApiAddress, StringFormat='Control plane · {0}'}"
+                                   Classes="muted" FontSize="11" HorizontalAlignment="Center" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Grid>
+
+        <Grid Grid.Row="1" IsVisible="{Binding IsShellVisible}" ColumnDefinitions="224,*">
+            <Border Background="#0D0912" BorderBrush="#261C31" BorderThickness="0,0,1,0" Padding="14,20">
+                <Grid RowDefinitions="Auto,*,Auto">
+                    <StackPanel Spacing="3" Margin="8,0,8,22">
+                        <TextBlock Text="KOPT ARK" FontSize="17" FontWeight="Bold" />
+                        <TextBlock Text="{Binding AccountLabel}" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="1" Spacing="5">
+                        <Button Content="Dashboard" Classes="nav" Command="{Binding NavigateCommand}" CommandParameter="Dashboard" />
+                        <Button Content="Diagnostics" Classes="nav" Command="{Binding NavigateCommand}" CommandParameter="Diagnostics" />
+                        <Button Content="Settings" Classes="nav" Command="{Binding NavigateCommand}" CommandParameter="Settings" />
+                    </StackPanel>
+                    <StackPanel Grid.Row="2" Spacing="8">
+                        <Border Background="#171020" CornerRadius="10" Padding="12">
+                            <StackPanel Spacing="3">
+                                <TextBlock Text="PRODUCT" Classes="eyebrow" />
+                                <TextBlock Text="{Binding ProductState}" FontWeight="Bold" />
+                            </StackPanel>
+                        </Border>
+                        <Button Content="Sign out" Classes="nav" Command="{Binding LogoutCommand}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Grid Grid.Column="1">
+                <ScrollViewer IsVisible="{Binding IsDashboard}" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="34,28" Spacing="20">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="DASHBOARD" Classes="eyebrow" />
+                                <TextBlock Text="ARK: Survival Evolved" FontSize="28" FontWeight="Bold" />
+                                <TextBlock Text="One entitlement, one verified target, one controlled session." Classes="muted" />
+                            </StackPanel>
+                            <Button Grid.Column="1" Content="Refresh" Command="{Binding RefreshCommand}" IsEnabled="{Binding !IsBusy}" />
+                        </Grid>
+
+                        <Grid ColumnDefinitions="*,*" ColumnSpacing="16">
+                            <Border Classes="card">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="SUBSCRIPTION" Classes="eyebrow" />
+                                    <TextBlock Text="{Binding SubscriptionLabel}" FontSize="20" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding SubscriptionDetail}" Classes="muted" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="1" Classes="card">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="TARGET PROCESS" Classes="eyebrow" />
+                                    <TextBlock Text="{Binding GameState}" FontSize="20" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding GameDetail}" Classes="muted" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+
+                        <Border Classes="card" Padding="24">
+                            <Grid ColumnDefinitions="*,Auto">
+                                <StackPanel Spacing="8" MaxWidth="620">
+                                    <TextBlock Text="READY CHECK" Classes="eyebrow" />
+                                    <TextBlock Text="Validate → Lease → Inject → Handshake" FontSize="22" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding OperationMessage}" Classes="muted" TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding BusyText}" Foreground="#C4B5FD" FontWeight="SemiBold" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="10" Width="180" VerticalAlignment="Center">
+                                    <Button Content="Scan target" Command="{Binding ScanGameCommand}" IsEnabled="{Binding !IsBusy}" />
+                                    <Button Content="Launch / Inject" Classes="primary" Command="{Binding LaunchCommand}"
+                                            IsEnabled="{Binding !IsBusy}" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <Grid ColumnDefinitions="*,*,*" ColumnSpacing="16">
+                            <Border Classes="card" Padding="16"><StackPanel><TextBlock Text="LOADER" Classes="eyebrow"/><TextBlock Text="{Binding LoaderVersion}" FontWeight="SemiBold" /></StackPanel></Border>
+                            <Border Grid.Column="1" Classes="card" Padding="16"><StackPanel><TextBlock Text="BACKEND" Classes="eyebrow"/><TextBlock Text="LOADLIBRARY DEV" FontWeight="SemiBold" /></StackPanel></Border>
+                            <Border Grid.Column="2" Classes="card" Padding="16"><StackPanel><TextBlock Text="DIAGNOSTICS ID" Classes="eyebrow"/><TextBlock Text="{Binding DiagnosticsId}" FontWeight="SemiBold" /></StackPanel></Border>
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <ScrollViewer IsVisible="{Binding IsDiagnostics}">
+                    <StackPanel Margin="34,28" Spacing="20">
+                        <TextBlock Text="DIAGNOSTICS" Classes="eyebrow" />
+                        <TextBlock Text="Target and session state" FontSize="28" FontWeight="Bold" />
+                        <Border Classes="card"><Grid ColumnDefinitions="170,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="12">
+                            <TextBlock Text="Target" Classes="muted"/><TextBlock Grid.Column="1" Text="{Binding GamePath}" TextWrapping="Wrap" />
+                            <TextBlock Grid.Row="1" Text="SHA-256" Classes="muted"/><TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding GameHash}" TextWrapping="Wrap" />
+                            <TextBlock Grid.Row="2" Text="Expected" Classes="muted"/><TextBlock Grid.Row="2" Grid.Column="1" Text="9BC401417A776C5244A1B0B3255DC3AF4A9D73E3F5C1BA96228FBE3FB1A43477" TextWrapping="Wrap" />
+                            <TextBlock Grid.Row="3" Text="Control plane" Classes="muted"/><TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding ApiAddress}" />
+                            <TextBlock Grid.Row="4" Text="Diagnostics ID" Classes="muted"/><TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding DiagnosticsId}" />
+                        </Grid></Border>
+                        <Button Content="Run target scan" Command="{Binding ScanGameCommand}" HorizontalAlignment="Left" />
+                    </StackPanel>
+                </ScrollViewer>
+
+                <ScrollViewer IsVisible="{Binding IsSettings}">
+                    <StackPanel Margin="34,28" Spacing="20" MaxWidth="760" HorizontalAlignment="Left">
+                        <TextBlock Text="SETTINGS" Classes="eyebrow" />
+                        <TextBlock Text="Interface and motion" FontSize="28" FontWeight="Bold" />
+                        <Border Classes="card">
+                            <StackPanel Spacing="18">
+                                <Grid ColumnDefinitions="*,Auto">
+                                    <StackPanel><TextBlock Text="Reduced motion" FontWeight="SemiBold"/><TextBlock Text="Use short opacity changes instead of layout motion." Classes="muted" /></StackPanel>
+                                    <ToggleSwitch Grid.Column="1" IsChecked="{Binding ReducedMotion}" />
+                                </Grid>
+                                <Grid ColumnDefinitions="*,220">
+                                    <StackPanel><TextBlock Text="UI scale" FontWeight="SemiBold"/><TextBlock Text="Preview setting; persisted profiles follow after lifecycle validation." Classes="muted" /></StackPanel>
+                                    <Slider Grid.Column="1" Minimum="0.85" Maximum="1.35" Value="{Binding UiScale}" TickFrequency="0.05" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock Text="Access and refresh tokens are intentionally memory-only in this build. Secure OS credential storage is required before persistence is enabled." Classes="muted" TextWrapping="Wrap" />
+                    </StackPanel>
+                </ScrollViewer>
+
+                <Border IsVisible="{Binding IsBusy}" Background="#9909070D">
+                    <Border Classes="card" HorizontalAlignment="Center" VerticalAlignment="Center" Width="330">
+                        <StackPanel Spacing="14">
+                            <ProgressBar IsIndeterminate="True" Height="4" />
+                            <TextBlock Text="{Binding BusyText}" HorizontalAlignment="Center" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </Border>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>
