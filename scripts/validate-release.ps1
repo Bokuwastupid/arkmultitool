@@ -130,6 +130,10 @@ Assert-True ($payloadSource.Contains('if (key == VK_LBUTTON)') -and
 Assert-True ($payloadSource.Contains('Freecam consumes the same physical controls as the pawn') -and
     $payloadSource.Contains('release_message') -and $payloadSource.Contains('allow_system_close')) 'Freecam pawn-input isolation is missing'
 Assert-True ($runtimeSource.Contains('aim_enable_changed') -and $runtimeSource.Contains('menu_just_closed')) 'Aim fresh-activation guard is missing'
+Assert-True ($runtimeSource.Contains('const bool dead = actor_is_dead(actor)') -and
+    $runtimeSource.Contains('if (!dead && distance_m <= settings.alert_radius_m)') -and
+    $overlaySource.Contains('actor.kind == ActorKind::player && !actor_is_dead(actor)')) `
+    'Unified dead-player exclusion for radius, threat and radar counts is missing'
 Assert-True ($runtimeSource.Contains('dino_activated') -and $runtimeSource.Contains('dino_aim_toggle_active_')) `
     'Independent dino aim activation state is missing'
 Assert-True ($runtimeSource.Contains('snapshot_.world_address != active_world_') -and $runtimeSource.Contains('abandon_chams')) 'Reconnect-safe chams world guard is missing'

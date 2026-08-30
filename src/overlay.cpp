@@ -314,7 +314,7 @@ namespace
 
     PlayerEspState player_esp_state(const kopt::Actor& actor)
     {
-        if (actor.dead || (actor.max_health > 0.0F && actor.health <= 0.0F)) return PlayerEspState::dead;
+        if (kopt::actor_is_dead(actor)) return PlayerEspState::dead;
         const float torpor_ratio = actor.max_torpor > 0.0F ?
             std::clamp(actor.torpor / actor.max_torpor, 0.0F, 1.0F) : 0.0F;
         if (torpor_ratio >= 0.95F) return PlayerEspState::knocked_out;
@@ -797,7 +797,7 @@ namespace kopt
         const auto count_summary = [&](const Actor& actor) {
             if (settings.show_structure_summary && actor.kind == ActorKind::structure && !actor.turret)
                 ++structure_summary[actor.name.empty() ? L"Structure" : actor.name];
-            if (settings.show_player_summary && actor.kind == ActorKind::player)
+            if (settings.show_player_summary && actor.kind == ActorKind::player && !actor_is_dead(actor))
                 ++player_summary[summary_key(actor)];
             if (settings.show_dino_summary && actor.kind == ActorKind::dino && actor.team >= 50000)
                 ++dino_summary[summary_key(actor)];
@@ -906,9 +906,10 @@ namespace kopt
             const bool detailed = distance_m <= settings.esp_detail_distance_m;
             if (!allied && distance_m <= settings.threat_distance_m)
             {
-                if (actor.kind == ActorKind::player) ++threat_players;
+                if (actor.kind == ActorKind::player && !actor_is_dead(actor)) ++threat_players;
                 else if (actor.kind == ActorKind::structure && actor.turret) ++threat_turrets;
-                if (actor.kind == ActorKind::player || (actor.kind == ActorKind::structure && actor.turret))
+                if ((actor.kind == ActorKind::player && !actor_is_dead(actor)) ||
+                    (actor.kind == ActorKind::structure && actor.turret))
                     nearest_threat = std::min(nearest_threat, distance_m);
             }
             if (settings.summary_uses_filters) count_summary(actor);
@@ -1426,7 +1427,10 @@ namespace kopt
             fill({x - dot, y - dot, x + dot, y + dot}, color);
             if (!allied)
             {
-                if (actor.kind == ActorKind::player) ++enemy_players;
+                if (actor.kind == ActorKind::player)
+                {
+                    if (!actor_is_dead(actor)) ++enemy_players;
+                }
                 else ++enemy_dinos;
             }
         }

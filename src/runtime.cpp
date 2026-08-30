@@ -986,6 +986,7 @@ namespace kopt
             const bool allied = (snapshot_.local_team != 0 && actor.team == snapshot_.local_team) ||
                 settings.is_allied(actor.team);
             const bool enemy_player = actor.kind == ActorKind::player && !allied;
+            const bool dead = actor_is_dead(actor);
             const bool noglin = actor.kind == ActorKind::dino &&
                 lower(actor.name).find(L"noglin") != std::wstring::npos && !allied;
             const bool hostile_turret = actor.turret && !allied;
@@ -1007,10 +1008,10 @@ namespace kopt
                 tracker.motion_sample = now;
                 tracker.sleeping = actor.sleeping;
                 tracker.knocked_out = knocked_out;
-                tracker.dead = actor.dead;
+                tracker.dead = dead;
                 tracker.noglin_inside = initially_noglin_inside;
                 tracker.turret_threat = turret_threat;
-                if (enemy_player && !actor.dead && !actor.sleeping && distance_m <= settings.alert_radius_m &&
+                if (enemy_player && !dead && !actor.sleeping && distance_m <= settings.alert_radius_m &&
                     settings.alert_new_player)
                     emit_actor(actor, tracker, AlertKind::new_player, L"New enemy player");
                 if (initially_noglin_inside && settings.alert_noglin)
@@ -1024,9 +1025,9 @@ namespace kopt
 
             if (enemy_player)
             {
-                if (!actor.dead && distance_m <= settings.alert_radius_m) ++enemy_group_count;
+                if (!dead && distance_m <= settings.alert_radius_m) ++enemy_group_count;
                 const float sample_seconds = std::chrono::duration<float>(now - tracker.motion_sample).count();
-                if (!actor.dead && !actor.sleeping && sample_seconds >= 0.25F)
+                if (!dead && !actor.sleeping && sample_seconds >= 0.25F)
                 {
                     const float old_distance = distance(tracker.position, snapshot_.local_position);
                     const float closing_speed_mps = (old_distance - distance(actor.position, snapshot_.local_position)) /
@@ -1037,11 +1038,11 @@ namespace kopt
                     tracker.position = actor.position;
                     tracker.motion_sample = now;
                 }
-                if (settings.alert_sleep && knocked_out && !tracker.knocked_out)
+                if (!dead && settings.alert_sleep && knocked_out && !tracker.knocked_out)
                     emit_actor(actor, tracker, AlertKind::sleep, L"Enemy knocked out", torpor_ratio * 100.0F);
-                else if (settings.alert_sleep && actor.sleeping && !tracker.sleeping && !knocked_out)
+                else if (!dead && settings.alert_sleep && actor.sleeping && !tracker.sleeping && !knocked_out)
                     emit_actor(actor, tracker, AlertKind::sleep, L"Enemy fell asleep", torpor_ratio * 100.0F);
-                if (settings.alert_death && actor.dead && !tracker.dead)
+                if (settings.alert_death && dead && !tracker.dead)
                     emit_actor(actor, tracker, AlertKind::death, L"Enemy died");
             }
             if (settings.alert_noglin && noglin_inside && !tracker.noglin_inside)
@@ -1050,7 +1051,7 @@ namespace kopt
                 emit_actor(actor, tracker, AlertKind::turret, L"Turret targeting threat");
             tracker.sleeping = actor.sleeping;
             tracker.knocked_out = knocked_out;
-            tracker.dead = actor.dead;
+            tracker.dead = dead;
             tracker.noglin_inside = noglin_inside;
             tracker.turret_threat = turret_threat;
         }
@@ -1699,7 +1700,7 @@ namespace kopt
             return point;
         };
         const auto eligible = [&](const Actor& actor) {
-            if (actor.dead || actor.stale_seconds > 0.0F ||
+            if (actor_is_dead(actor) || actor.stale_seconds > 0.0F ||
                 (actor.kind == ActorKind::player && !player_activated) ||
                 (actor.kind == ActorKind::dino && !dino_activated) ||
                 (actor.kind != ActorKind::player && actor.kind != ActorKind::dino)) return false;

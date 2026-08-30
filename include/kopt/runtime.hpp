@@ -67,6 +67,11 @@ namespace kopt
         float refresh_elapsed{};
     };
 
+    [[nodiscard]] inline bool actor_is_dead(const Actor& actor) noexcept
+    {
+        return actor.dead || (actor.max_health > 0.0F && actor.health <= 0.0F);
+    }
+
     struct Camera
     {
         Vec3 location{};
