@@ -2111,12 +2111,24 @@ namespace kopt
                 bool active{};
                 bool shown{};
                 bool special{};
+                bool visibility_control{};
             };
             std::vector<HotkeyEntry> entries;
+            entries.push_back({L"system.menu", L"Menu toggle", L"System", settings.menu_key,
+                1, settings.menu_open, false, true, false});
+            entries.push_back({L"system.unload", L"Unload DLL", L"System", settings.unload_key,
+                -1, false, false, true, false});
+            entries.push_back({L"system.freecam", L"Quick freecam toggle", L"System", settings.freecam_key,
+                1, settings.freecam, false, true, false});
+            entries.push_back({L"system.esp", L"Quick ESP toggle", L"System", settings.esp_toggle_key,
+                1, settings.esp_enabled, false, true, false});
+            entries.push_back({L"system.panic", L"Panic / restore", L"System", settings.panic_key,
+                -1, false, false, true, false});
             entries.push_back({L"aim.player", L"Player aim", L"Aim", settings.aim_key,
-                settings.aim_activation_mode, runtime.snapshot().player_aim_active, settings.aim_bind_show, true});
+                settings.aim_activation_mode, runtime.snapshot().player_aim_active, settings.aim_bind_show, true, true});
             entries.push_back({L"aim.dino", L"Dino aim", L"Aim", settings.dino_aim_key,
-                settings.dino_aim_activation_mode, runtime.snapshot().dino_aim_active, settings.dino_aim_bind_show, true});
+                settings.dino_aim_activation_mode, runtime.snapshot().dino_aim_active,
+                settings.dino_aim_bind_show, true, true});
             for (const FeatureBinding& binding : settings.feature_bindings)
             {
                 if (binding.key == 0) continue;
@@ -2125,7 +2137,8 @@ namespace kopt
                 const auto state = std::find_if(feature_binding_runtime_.begin(), feature_binding_runtime_.end(),
                     [&](const auto& item) { return item.id == binding.id; });
                 entries.push_back({binding.id, descriptor->label, descriptor->category, binding.key, binding.mode,
-                    state != feature_binding_runtime_.end() && state->active, binding.show_in_list, false});
+                    state != feature_binding_runtime_.end() && state->active,
+                    binding.show_in_list, false, true});
             }
             constexpr int entries_per_page = 6;
             const int page_count = std::max(1, static_cast<int>((entries.size() + entries_per_page - 1) / entries_per_page));
@@ -2147,10 +2160,11 @@ namespace kopt
                 text(entry.label, {row.left + 12.0F, row.top + 3.0F, row.left + 245.0F, row.top + 24.0F},
                     text_primary, 12.0F);
                 text(entry.category + L" · " + key_name(entry.key) + L" · " +
-                    (entry.mode == 0 ? L"Hold" : entry.mode == 1 ? L"Toggle" : L"Always"),
+                    (entry.mode < 0 ? L"Action" : entry.mode == 0 ? L"Hold" :
+                        entry.mode == 1 ? L"Toggle" : L"Always"),
                     {row.left + 12.0F, row.top + 22.0F, row.left + 350.0F, row.bottom - 2.0F},
                     text_secondary, 10.0F);
-                if (button(entry.shown ? L"Eye" : L"Hidden",
+                if (entry.visibility_control && button(entry.shown ? L"Eye" : L"Hidden",
                     {row.right - 158.0F, row.top + 7.0F, row.right - 82.0F, row.bottom - 7.0F}, entry.shown, input))
                 {
                     if (entry.id == L"aim.player") settings.aim_bind_show = !settings.aim_bind_show;
@@ -2158,6 +2172,9 @@ namespace kopt
                     else if (FeatureBinding* binding = settings.find_feature_binding(entry.id))
                         binding->show_in_list = !binding->show_in_list;
                 }
+                else if (!entry.visibility_control)
+                    text(L"SYSTEM", {row.right - 158.0F, row.top + 7.0F,
+                        row.right - 82.0F, row.bottom - 7.0F}, text_secondary, 9.0F, TextAlign::center);
                 if (!entry.special && button(L"Remove",
                     {row.right - 76.0F, row.top + 7.0F, row.right - 8.0F, row.bottom - 7.0F}, false, input))
                 {
