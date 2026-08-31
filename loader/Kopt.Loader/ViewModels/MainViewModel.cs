@@ -49,6 +49,13 @@ public partial class MainViewModel : ViewModelBase
     public bool IsSettings => ActivePage == "Settings";
     public string ApiAddress => controlPlane.BaseAddress.ToString().TrimEnd('/');
 
+    // TODO(auth): local-only bypass while the control plane is offline (see
+    // LocalDevAuthHandler.cs on the backend side for the matching temp
+    // measure there). Never contacts the backend at all. Remove once real
+    // login against a running control plane is wired back in.
+    private const string LocalBypassEmail = "admin";
+    private const string LocalBypassPassword = "admin";
+
     [RelayCommand]
     private async Task LoginAsync()
     {
@@ -56,6 +63,16 @@ public partial class MainViewModel : ViewModelBase
         if (string.IsNullOrWhiteSpace(Email) || string.IsNullOrWhiteSpace(Password))
         {
             LoginMessage = "Email and password are required.";
+            return;
+        }
+        if (string.Equals(Email.Trim(), LocalBypassEmail, StringComparison.OrdinalIgnoreCase) &&
+            Password == LocalBypassPassword)
+        {
+            Password = string.Empty;
+            AccountLabel = $"{LocalBypassEmail} (local bypass)";
+            IsAuthenticated = true;
+            LoginMessage = string.Empty;
+            OperationMessage = "Signed in via local bypass -- control plane was not contacted.";
             return;
         }
         await RunBusy("Authorizing device…", async cancellationToken =>
@@ -103,32 +120,63 @@ public partial class MainViewModel : ViewModelBase
         }, error => OperationMessage = error);
     }
 
+    [ObservableProperty] public partial bool LaunchSucceeded { get; set; }
+    [ObservableProperty] public partial bool LaunchFailed { get; set; }
+
     [RelayCommand]
     private async Task LaunchAsync()
     {
         if (IsBusy) return;
+        LaunchSucceeded = false;
+        LaunchFailed = false;
         await RunBusy("Validating entitlement and target…", async cancellationToken =>
         {
-            var entitlements = await controlPlane.GetEntitlementsAsync(cancellationToken);
-            _ = entitlements.FirstOrDefault(x => x.Slug == "ark-ase" && x.Active && x.ProductEnabled)
-                ?? throw new InvalidOperationException("An active ARK entitlement is required.");
+            // TODO(auth): controlPlane.Authenticated is false under the local
+            // admin/admin bypass (no token was ever issued) -- skip the
+            // entitlement/lease round-trip against a backend that isn't
+            // running instead of failing every launch on it.
+            if (controlPlane.Authenticated)
+            {
+                var entitlements = await controlPlane.GetEntitlementsAsync(cancellationToken);
+                _ = entitlements.FirstOrDefault(x => x.Slug == "ark-ase" && x.Active && x.ProductEnabled)
+                    ?? throw new InvalidOperationException("An active ARK entitlement is required.");
+            }
             game = await gameCoordinator.ScanAsync(cancellationToken);
             ApplyGame(game);
-            if (!game.Running || !game.Supported)
+            if (OperatingSystem.IsWindows() && (!game.Running || !game.Supported))
                 throw new InvalidOperationException(game.Detail);
-            BusyText = "Acquiring signed device lease…";
-            var sessionId = Token(24);
-            var nonce = Token(32);
-            var lease = await controlPlane.AcquireLeaseAsync(DeviceIdentity.Fingerprint(),
-                DeviceIdentity.DisplayName, sessionId, nonce, cancellationToken);
-            if (lease.ExpiresAt <= DateTimeOffset.UtcNow)
-                throw new InvalidOperationException("Control plane returned an expired lease.");
-            BusyText = "Starting version-pinned injector…";
+            if (controlPlane.Authenticated)
+            {
+                BusyText = "Acquiring signed device lease…";
+                var sessionId = Token(24);
+                var nonce = Token(32);
+                var lease = await controlPlane.AcquireLeaseAsync(DeviceIdentity.Fingerprint(),
+                    DeviceIdentity.DisplayName, sessionId, nonce, cancellationToken);
+                if (lease.ExpiresAt <= DateTimeOffset.UtcNow)
+                    throw new InvalidOperationException("Control plane returned an expired lease.");
+            }
+            BusyText = OperatingSystem.IsWindows() ? "Starting version-pinned injector…" : "Installing Proton auto-load proxy…";
             var result = await gameCoordinator.InjectAsync(game, cancellationToken);
             DiagnosticsId = result.DiagnosticsId;
             OperationMessage = result.Message;
             if (!result.Success) throw new InvalidOperationException(result.Message);
-        }, error => OperationMessage = error);
+            LaunchSucceeded = true;
+        }, error => { OperationMessage = error; LaunchFailed = true; });
+    }
+
+    [RelayCommand]
+    private async Task EjectAsync()
+    {
+        if (IsBusy) return;
+        LaunchSucceeded = false;
+        LaunchFailed = false;
+        await RunBusy("Removing Proton auto-load proxy…", async cancellationToken =>
+        {
+            var result = await gameCoordinator.UninstallAsync(cancellationToken);
+            DiagnosticsId = result.DiagnosticsId;
+            OperationMessage = result.Message;
+            if (!result.Success) throw new InvalidOperationException(result.Message);
+        }, error => { OperationMessage = error; LaunchFailed = true; });
     }
 
     private async Task RefreshCore(CancellationToken cancellationToken)

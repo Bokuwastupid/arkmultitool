@@ -1007,6 +1007,34 @@ namespace
         return DefWindowProcW(window, message, wparam, lparam);
     }
 
+    // Confirmed by reproducing against a real launch: touching D3D11 at all
+    // -- even just D3D11CreateDeviceAndSwapChain for a throwaway probe
+    // device to read the vtable, below -- before Wine's DXVK/vkd3d backend
+    // has finished initializing corrupts state badly enough to crash the
+    // whole process a few seconds later (bad vtable pointer, garbage
+    // instruction at the "Present" slot). The payload loads via version.dll
+    // at process start, long before the engine creates its own device, so
+    // install_hooks() used to run immediately with no guard at all. d3d11/
+    // dxgi being loaded is necessary but not sufficient -- give DXVK a
+    // grace period afterward too, same margin ark_fun_tools' own working
+    // overlay uses for the same reason on this same game/Wine stack.
+    bool wait_for_render_ready()
+    {
+        for (int waited_ms = 0; !g_stop.load(std::memory_order_acquire); waited_ms += 250)
+        {
+            if (GetModuleHandleW(L"d3d11.dll") != nullptr && GetModuleHandleW(L"dxgi.dll") != nullptr)
+            {
+                log_line(L"d3d11/dxgi present; waiting for DXVK to settle before probing");
+                Sleep(2000);
+                return true;
+            }
+            if (waited_ms > 0 && waited_ms % 30000 == 0)
+                log_line(std::format(L"Still waiting for d3d11/dxgi to load ({} s)", waited_ms / 1000));
+            Sleep(250);
+        }
+        return false;
+    }
+
     bool install_hooks()
     {
         log_line(L"Installing DXGI hooks");
@@ -1128,6 +1156,15 @@ namespace
         install_game_exception_guard();
         sync_hotkeys();
         g_menu_open.store(g_settings.menu_open, std::memory_order_release);
+        if (!wait_for_render_ready())
+        {
+            // Only reachable via KoptRequestUnload firing before the game
+            // ever got this far -- not an error, just an early exit.
+            log_line(L"Unload requested before render was ready; skipping hook install");
+            remove_game_exception_guard();
+            CoUninitialize();
+            FreeLibraryAndExitThread(g_module, 0);
+        }
         if (!install_hooks())
         {
             log_line(L"DXGI hook installation failed; unloading payload");

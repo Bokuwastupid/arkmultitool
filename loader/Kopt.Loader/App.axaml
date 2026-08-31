@@ -34,6 +34,14 @@
             <Setter Property="Foreground" Value="White" />
         </Style>
         <Style Selector="Button.primary:pointerover"><Setter Property="Background" Value="#9D78FF" /></Style>
+        <Style Selector="Button.launch-success">
+            <Setter Property="BorderBrush" Value="#22C55E" />
+            <Setter Property="BorderThickness" Value="2" />
+        </Style>
+        <Style Selector="Button.launch-error">
+            <Setter Property="BorderBrush" Value="#EF4444" />
+            <Setter Property="BorderThickness" Value="2" />
+        </Style>
         <Style Selector="Button.nav">
             <Setter Property="HorizontalContentAlignment" Value="Left" />
             <Setter Property="Background" Value="Transparent" />

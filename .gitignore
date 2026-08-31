@@ -1,8 +1,12 @@
 # Native and managed build output
 /build/
 /build-msvc/
+/build-mingw/
 /output/
 /loader/dist/
+
+# CodeGraph index
+/.codegraph/
 **/bin/
 **/obj/
 *.exe

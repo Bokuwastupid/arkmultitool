@@ -131,7 +131,10 @@
                                 <StackPanel Grid.Column="1" Spacing="10" Width="180" VerticalAlignment="Center">
                                     <Button Content="Scan target" Command="{Binding ScanGameCommand}" IsEnabled="{Binding !IsBusy}" />
                                     <Button Content="Launch / Inject" Classes="primary" Command="{Binding LaunchCommand}"
+                                            Classes.launch-success="{Binding LaunchSucceeded}"
+                                            Classes.launch-error="{Binding LaunchFailed}"
                                             IsEnabled="{Binding !IsBusy}" />
+                                    <Button Content="Eject / Uninstall" Command="{Binding EjectCommand}" IsEnabled="{Binding !IsBusy}" />
                                 </StackPanel>
                             </Grid>
                         </Border>

@@ -67,6 +67,24 @@ builder.Services.AddAuthorizationBuilder().AddPolicy("Admin", policy =>
     if (builder.Configuration.GetValue("Security:RequireAdminMfa", false))
         policy.RequireClaim("amr", "mfa");
 });
+
+// TODO(auth): remove once the loader talks to a real login again -- see
+// Security/LocalDevAuthHandler.cs for why this can't just drop
+// RequireAuthorization() outright (every endpoint reads the caller's id
+// off the principal). Double-gated: Development environment AND an
+// explicit opt-in, so a stray env var can never disable auth in prod.
+var devBypassAuth = builder.Environment.IsDevelopment() &&
+    builder.Configuration.GetValue("Security:DevBypassAuth", false);
+if (devBypassAuth)
+{
+    builder.Services.AddAuthentication(options =>
+        {
+            options.DefaultAuthenticateScheme = LocalDevAuth.SchemeName;
+            options.DefaultChallengeScheme = LocalDevAuth.SchemeName;
+        })
+        .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, LocalDevAuthHandler>(
+            LocalDevAuth.SchemeName, _ => { });
+}
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -95,6 +113,13 @@ builder.Services.AddSingleton<SecretHasher>();
 builder.Services.AddSingleton<CapabilitySigner>();
 
 var app = builder.Build();
+if (devBypassAuth)
+{
+    app.Logger.LogWarning(
+        "!!! Security:DevBypassAuth is ON -- every request is authenticated as {Email} with no credential check. " +
+        "Local development only; see TODO(auth) in Program.cs and LocalDevAuthHandler.cs. !!!",
+        LocalDevAuth.DevUserEmail);
+}
 app.UseExceptionHandler();
 app.UseHttpsRedirection();
 app.UseDefaultFiles();
@@ -117,6 +142,8 @@ if (app.Configuration.GetValue("Database:AutoMigrate", false))
     else
         await database.Database.MigrateAsync();
     await Bootstrapper.SeedAsync(scope.ServiceProvider, app.Configuration);
+    if (devBypassAuth)
+        await Bootstrapper.SeedDevBypassUserAsync(scope.ServiceProvider);
 }
 
 await app.RunAsync();
@@ -195,6 +222,48 @@ internal static class Bootstrapper
                 });
                 await db.SaveChangesAsync();
             }
+        }
+    }
+
+    // TODO(auth): drop alongside LocalDevAuthHandler once real login is
+    // wired back in. Gives the fixed dev-bypass identity a real row and an
+    // active subscription so entitlement/lease checks behave the same as
+    // for a normal logged-in user instead of 404ing on a principal with no
+    // backing account.
+    public static async Task SeedDevBypassUserAsync(IServiceProvider services)
+    {
+        var db = services.GetRequiredService<KoptDbContext>();
+        var users = services.GetRequiredService<UserManager<AppUser>>();
+        var user = await users.FindByIdAsync(LocalDevAuth.DevUserId.ToString());
+        if (user is null)
+        {
+            user = new AppUser
+            {
+                Id = LocalDevAuth.DevUserId,
+                UserName = LocalDevAuth.DevUserEmail,
+                Email = LocalDevAuth.DevUserEmail,
+                EmailConfirmed = true
+            };
+            IdentityResultGuard(await users.CreateAsync(user));
+        }
+        if (!await users.IsInRoleAsync(user, "Admin"))
+            IdentityResultGuard(await users.AddToRoleAsync(user, "Admin"));
+
+        var product = await db.Products.SingleAsync(x => x.Slug == "ark-ase");
+        var subscription = await db.Subscriptions.SingleOrDefaultAsync(x =>
+            x.UserId == user.Id && x.ProductId == product.Id);
+        if (subscription is null)
+        {
+            var now = DateTimeOffset.UtcNow;
+            db.Subscriptions.Add(new Subscription
+            {
+                UserId = user.Id,
+                ProductId = product.Id,
+                StartsAt = now,
+                EndsAt = now.AddYears(1),
+                SlotLimit = 5
+            });
+            await db.SaveChangesAsync();
         }
     }
 
