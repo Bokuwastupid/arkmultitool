@@ -35,6 +35,7 @@ namespace kopt
         std::atomic<bool> toggle_freecam_requested{};
         std::atomic<bool> toggle_esp_requested{};
         std::atomic<bool> toggle_panic_requested{};
+        std::atomic<bool> diagnostics_bundle_requested{};
 
         int frame_mouse_x{};
         int frame_mouse_y{};
@@ -111,6 +112,7 @@ namespace kopt
         void draw_hotkey_list(const Settings& settings, const ArkRuntime& runtime);
         void draw_menu(Settings& settings, ArkRuntime& runtime, InputState& input,
             const std::filesystem::path& settings_path);
+        void draw_command_palette(Settings& settings, InputState& input, const Rect& menu_frame);
         void draw_esp_preview(Settings& settings, float x, float y, InputState& input);
         void draw_debug(const ArkRuntime& runtime);
         void fill(const Rect& rect, const Color& color);
@@ -156,6 +158,9 @@ namespace kopt
         std::array<float, 352> glyph_advances_{};
         float width_{};
         float height_{};
+        float last_overlay_build_ms_{};
+        float last_overlay_flush_ms_{};
+        std::size_t last_vertex_count_{};
         std::size_t vertex_capacity_{131072};
         int active_tab_{};
         int active_aim_section_{};
@@ -169,6 +174,8 @@ namespace kopt
         int camera_settings_page_{};
         int alert_settings_page_{};
         int hotkey_page_{};
+        int command_page_{};
+        int loaded_layout_{-1};
         int relation_page_{};
         int color_target_{};
         int open_combo_{-1};
@@ -201,6 +208,9 @@ namespace kopt
         bool preview_position_initialized_{};
         bool preview_window_dragging_{};
         bool preview_occluded_{};
+        bool command_palette_open_{};
+        bool aim_replay_live_{true};
+        std::size_t aim_replay_index_{};
         float preview_left_{};
         float preview_top_{};
         float preview_drag_offset_x_{};
@@ -210,6 +220,7 @@ namespace kopt
         std::wstring profile_delete_confirmation_;
         std::chrono::steady_clock::time_point profile_delete_confirmation_until_{};
         std::wstring structure_catalog_search_;
+        std::wstring command_search_;
         struct StructureCatalogItem
         {
             std::wstring class_name;

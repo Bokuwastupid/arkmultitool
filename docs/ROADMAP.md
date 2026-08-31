@@ -61,6 +61,12 @@ Tamper detection не удаляет файлы пользователя и не
 
 ## Этап 6 — будущие функции
 
+- [x] Targeting Lab с bounded trace, live state, safe replay и CSV export.
+- [x] Manual/unhandled crash diagnostics bundle с minidump и runtime context.
+- [x] Favorites и searchable command palette на едином feature catalog.
+- [x] Bind conflict inspector с явной подсветкой и переходом к rebind.
+- [x] Four saved layouts, UI scale и compact responsive navigation breakpoint.
+
 - target priority extensions: visibility and threat scoring;
 - projectile prediction profiles per weapon/ammo while preserving normal smoothing;
 - independent rider/dino target selection while mounted;

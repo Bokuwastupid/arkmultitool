@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -25,11 +26,28 @@ namespace kopt
         bool show_in_list{true};
     };
 
+    struct UiLayout
+    {
+        float menu_width{780.0F};
+        float menu_height{600.0F};
+        float menu_x{0.50F};
+        float menu_y{0.50F};
+        float ui_scale{1.0F};
+        float hotkey_x{0.82F};
+        float hotkey_y{0.18F};
+        float radar_x{0.86F};
+        float radar_y{0.20F};
+    };
+
     struct Settings
     {
         bool menu_open{true};
         float menu_width{780.0F};
         float menu_height{600.0F};
+        float ui_scale{1.0F};
+        std::int32_t active_layout{};
+        std::array<UiLayout, 4> ui_layouts{};
+        std::wstring favorite_features;
 
         bool player_aim{false};
         bool dino_aim{false};
@@ -205,6 +223,7 @@ namespace kopt
         float chams_budget{128.0F};
 
         bool debug_panel{true};
+        bool aim_lab_recording{};
         bool show_hotkey_list{true};
         float hotkey_list_x{0.82F};
         float hotkey_list_y{0.18F};

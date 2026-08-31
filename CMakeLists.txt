@@ -26,7 +26,7 @@ target_compile_definitions(kopt_payload PRIVATE
     NOMINMAX
     KOPT_PAYLOAD_EXPORTS
 )
-target_link_libraries(kopt_payload PRIVATE d3d11 d3dcompiler dxgi gdi32 user32 winmm)
+target_link_libraries(kopt_payload PRIVATE d3d11 d3dcompiler dxgi gdi32 user32 winmm dbghelp)
 set_target_properties(kopt_payload PROPERTIES
     PREFIX ""
     OUTPUT_NAME "kopt_payload"

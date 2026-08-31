@@ -8,6 +8,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
+#include <dbghelp.h>
 
 #include <atomic>
 #include <algorithm>
@@ -89,6 +90,7 @@ namespace
     bool g_chams_rasterizer_valid{};
     std::uint32_t g_uploaded_chams_color{};
     PVOID g_exception_guard_handle{};
+    LPTOP_LEVEL_EXCEPTION_FILTER g_previous_exception_filter{};
     std::uintptr_t g_game_module_base{};
     alignas(8) std::uint64_t g_none_fname{};
     std::atomic<std::uint32_t> g_skeleton_guard_hits{};
@@ -117,6 +119,65 @@ namespace
         DWORD written{};
         WriteFile(file, line.data(), static_cast<DWORD>(line.size() * sizeof(wchar_t)), &written, nullptr);
         CloseHandle(file);
+    }
+
+    std::filesystem::path write_diagnostics_bundle(EXCEPTION_POINTERS* exception, const bool crash)
+    {
+        if (g_log_path.empty()) return {};
+        SYSTEMTIME time{};
+        GetLocalTime(&time);
+        const std::wstring stamp = std::format(L"{:04}{:02}{:02}-{:02}{:02}{:02}-{:03}",
+            time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond, time.wMilliseconds);
+        const std::filesystem::path directory = g_log_path.parent_path() / L"diagnostics" /
+            ((crash ? std::wstring(L"crash-") : std::wstring(L"manual-")) + stamp);
+        std::error_code directory_error;
+        std::filesystem::create_directories(directory, directory_error);
+        if (directory_error) return {};
+
+        const std::filesystem::path dump_path = directory / L"ShooterGame.dmp";
+        const HANDLE dump = CreateFileW(dump_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (dump != INVALID_HANDLE_VALUE)
+        {
+            MINIDUMP_EXCEPTION_INFORMATION exception_information{};
+            exception_information.ThreadId = GetCurrentThreadId();
+            exception_information.ExceptionPointers = exception;
+            exception_information.ClientPointers = FALSE;
+            const MINIDUMP_TYPE type = static_cast<MINIDUMP_TYPE>(
+                MiniDumpWithThreadInfo | MiniDumpWithProcessThreadData | MiniDumpWithUnloadedModules);
+            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), dump, type,
+                exception != nullptr ? &exception_information : nullptr, nullptr, nullptr);
+            CloseHandle(dump);
+        }
+
+        const std::filesystem::path context_path = directory / L"context.txt";
+        const HANDLE context = CreateFileW(context_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (context != INVALID_HANDLE_VALUE)
+        {
+            const std::wstring payload = std::format(
+                L"KOPT diagnostics\r\nKind={}\r\nPID={}\r\nWorldGeneration={}\r\n"
+                L"LocalValid={}\r\nAimActive={}\r\nMenuOpen={}\r\nSkeletonGuardHits={}\r\n",
+                crash ? L"crash" : L"manual", GetCurrentProcessId(), g_logged_world_generation,
+                g_logged_local_valid, g_logged_aim_active, g_menu_open.load(std::memory_order_relaxed),
+                g_skeleton_guard_hits.load(std::memory_order_relaxed));
+            const wchar_t bom = 0xFEFF;
+            DWORD written{};
+            WriteFile(context, &bom, sizeof(bom), &written, nullptr);
+            WriteFile(context, payload.data(), static_cast<DWORD>(payload.size() * sizeof(wchar_t)), &written, nullptr);
+            CloseHandle(context);
+        }
+        CopyFileW(g_log_path.c_str(), (directory / L"kopt_internal.log").c_str(), FALSE);
+        return directory;
+    }
+
+    LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS* exception)
+    {
+        write_diagnostics_bundle(exception, true);
+        if (g_previous_exception_filter != nullptr &&
+            g_previous_exception_filter != &unhandled_exception_filter)
+            return g_previous_exception_filter(exception);
+        return EXCEPTION_CONTINUE_SEARCH;
     }
 
     LONG CALLBACK game_exception_guard(EXCEPTION_POINTERS* exception)
@@ -887,6 +948,12 @@ namespace
                 }
                 ensure_camera_hook();
                 g_overlay.render(swap_chain, g_settings, g_runtime, g_input, g_settings_path);
+                if (g_input.diagnostics_bundle_requested.exchange(false, std::memory_order_acq_rel))
+                {
+                    const auto bundle = write_diagnostics_bundle(nullptr, false);
+                    log_line(bundle.empty() ? L"Manual diagnostics bundle failed" :
+                        L"Manual diagnostics bundle: " + bundle.wstring());
+                }
                 sync_hotkeys();
             }
         }
@@ -1027,6 +1094,7 @@ namespace
         g_settings_path = directory / L"kopt_internal.ini";
         g_log_path = directory / L"kopt_internal.log";
         log_line(L"Payload worker started");
+        g_previous_exception_filter = SetUnhandledExceptionFilter(&unhandled_exception_filter);
         g_settings.load(g_settings_path);
         install_game_exception_guard();
         sync_hotkeys();
@@ -1036,6 +1104,7 @@ namespace
             log_line(L"DXGI hook installation failed; unloading payload");
             MessageBoxW(nullptr, L"DXGI hook installation failed.", L"KOPT Internal", MB_ICONERROR | MB_OK);
             remove_game_exception_guard();
+            SetUnhandledExceptionFilter(g_previous_exception_filter);
             CoUninitialize();
             FreeLibraryAndExitThread(g_module, 1);
         }
@@ -1047,6 +1116,7 @@ namespace
         while (g_active_callbacks.load() != 0) Sleep(1);
         g_runtime.restore_transient_state();
         remove_game_exception_guard();
+        SetUnhandledExceptionFilter(g_previous_exception_filter);
         g_settings.save(g_settings_path);
         CoUninitialize();
         FreeLibraryAndExitThread(g_module, 0);

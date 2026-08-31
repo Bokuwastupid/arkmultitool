@@ -8,7 +8,7 @@
 
 namespace
 {
-    constexpr std::uint32_t settings_schema_version = 20U;
+    constexpr std::uint32_t settings_schema_version = 21U;
 
     bool read_bool(const std::filesystem::path& path, const wchar_t* section,
         const wchar_t* key, const bool fallback)
@@ -107,6 +107,20 @@ namespace kopt
     {
         menu_width = std::clamp(menu_width, 760.0F, 1800.0F);
         menu_height = std::clamp(menu_height, 480.0F, 1400.0F);
+        ui_scale = std::clamp(ui_scale, 0.75F, 1.50F);
+        active_layout = std::clamp(active_layout, 0, 3);
+        for (UiLayout& layout : ui_layouts)
+        {
+            layout.menu_width = std::clamp(layout.menu_width, 760.0F, 1800.0F);
+            layout.menu_height = std::clamp(layout.menu_height, 480.0F, 1400.0F);
+            layout.menu_x = std::clamp(layout.menu_x, 0.0F, 1.0F);
+            layout.menu_y = std::clamp(layout.menu_y, 0.0F, 1.0F);
+            layout.ui_scale = std::clamp(layout.ui_scale, 0.75F, 1.50F);
+            layout.hotkey_x = std::clamp(layout.hotkey_x, 0.05F, 0.95F);
+            layout.hotkey_y = std::clamp(layout.hotkey_y, 0.05F, 0.95F);
+            layout.radar_x = std::clamp(layout.radar_x, 0.05F, 0.95F);
+            layout.radar_y = std::clamp(layout.radar_y, 0.05F, 0.95F);
+        }
         aim_fov = std::clamp(aim_fov, 1.0F, 90.0F);
         aim_distance_m = std::clamp(aim_distance_m, 10.0F, 2500.0F);
         aim_smoothing = std::clamp(aim_smoothing, 1.0F, 40.0F);
@@ -219,6 +233,23 @@ namespace kopt
         const auto loaded_schema_version = read_uint(path, L"Meta", L"SchemaVersion", 0U);
         menu_width = read_float(path, L"Menu", L"Width", menu_width);
         menu_height = read_float(path, L"Menu", L"Height", menu_height);
+        ui_scale = read_float(path, L"Menu", L"Scale", ui_scale);
+        active_layout = static_cast<std::int32_t>(read_uint(path, L"Menu", L"ActiveLayout", active_layout));
+        favorite_features = read_string(path, L"Menu", L"Favorites");
+        for (std::size_t index = 0; index < ui_layouts.size(); ++index)
+        {
+            const std::wstring section = L"Layout" + std::to_wstring(index + 1);
+            UiLayout& layout = ui_layouts[index];
+            layout.menu_width = read_float(path, section.c_str(), L"MenuWidth", layout.menu_width);
+            layout.menu_height = read_float(path, section.c_str(), L"MenuHeight", layout.menu_height);
+            layout.menu_x = read_float(path, section.c_str(), L"MenuX", layout.menu_x);
+            layout.menu_y = read_float(path, section.c_str(), L"MenuY", layout.menu_y);
+            layout.ui_scale = read_float(path, section.c_str(), L"Scale", layout.ui_scale);
+            layout.hotkey_x = read_float(path, section.c_str(), L"HotkeyX", layout.hotkey_x);
+            layout.hotkey_y = read_float(path, section.c_str(), L"HotkeyY", layout.hotkey_y);
+            layout.radar_x = read_float(path, section.c_str(), L"RadarX", layout.radar_x);
+            layout.radar_y = read_float(path, section.c_str(), L"RadarY", layout.radar_y);
+        }
         player_aim = read_bool(path, L"Aim", L"PlayerAim", player_aim);
         dino_aim = read_bool(path, L"Aim", L"DinoAim", dino_aim);
         aim_target_enemies = read_bool(path, L"Aim", L"TargetEnemies", aim_target_enemies);
@@ -410,6 +441,7 @@ namespace kopt
         local_chams_color = read_color(path, L"LocalChams", local_chams_color);
 
         debug_panel = read_bool(path, L"Runtime", L"DebugPanel", debug_panel);
+        aim_lab_recording = read_bool(path, L"Runtime", L"AimLabRecording", aim_lab_recording);
         show_hotkey_list = read_bool(path, L"Hotkeys", L"ShowList", show_hotkey_list);
         hotkey_list_x = read_float(path, L"Hotkeys", L"PositionX", hotkey_list_x);
         hotkey_list_y = read_float(path, L"Hotkeys", L"PositionY", hotkey_list_y);
@@ -461,6 +493,17 @@ namespace kopt
             aim_hitbox_mask = 0xFFU;
             random_hitbox = false;
         }
+        if (loaded_schema_version < 21U)
+        {
+            UiLayout& layout = ui_layouts[static_cast<std::size_t>(std::clamp(active_layout, 0, 3))];
+            layout.menu_width = menu_width;
+            layout.menu_height = menu_height;
+            layout.ui_scale = ui_scale;
+            layout.hotkey_x = hotkey_list_x;
+            layout.hotkey_y = hotkey_list_y;
+            layout.radar_x = radar_x;
+            layout.radar_y = radar_y;
+        }
         normalize();
         if (loaded_schema_version < settings_schema_version)
         {
@@ -479,6 +522,23 @@ namespace kopt
         write_uint(path, L"Meta", L"SchemaVersion", settings_schema_version);
         write_float(path, L"Menu", L"Width", menu_width);
         write_float(path, L"Menu", L"Height", menu_height);
+        write_float(path, L"Menu", L"Scale", ui_scale);
+        write_uint(path, L"Menu", L"ActiveLayout", static_cast<std::uint32_t>(active_layout));
+        write_value(path, L"Menu", L"Favorites", favorite_features);
+        for (std::size_t index = 0; index < ui_layouts.size(); ++index)
+        {
+            const std::wstring section = L"Layout" + std::to_wstring(index + 1);
+            const UiLayout& layout = ui_layouts[index];
+            write_float(path, section.c_str(), L"MenuWidth", layout.menu_width);
+            write_float(path, section.c_str(), L"MenuHeight", layout.menu_height);
+            write_float(path, section.c_str(), L"MenuX", layout.menu_x);
+            write_float(path, section.c_str(), L"MenuY", layout.menu_y);
+            write_float(path, section.c_str(), L"Scale", layout.ui_scale);
+            write_float(path, section.c_str(), L"HotkeyX", layout.hotkey_x);
+            write_float(path, section.c_str(), L"HotkeyY", layout.hotkey_y);
+            write_float(path, section.c_str(), L"RadarX", layout.radar_x);
+            write_float(path, section.c_str(), L"RadarY", layout.radar_y);
+        }
         write_bool(path, L"Aim", L"PlayerAim", player_aim);
         write_bool(path, L"Aim", L"DinoAim", dino_aim);
         write_bool(path, L"Aim", L"TargetEnemies", aim_target_enemies);
@@ -665,6 +725,7 @@ namespace kopt
         write_color(path, L"LocalChams", local_chams_color);
 
         write_bool(path, L"Runtime", L"DebugPanel", debug_panel);
+        write_bool(path, L"Runtime", L"AimLabRecording", aim_lab_recording);
         write_bool(path, L"Hotkeys", L"ShowList", show_hotkey_list);
         write_float(path, L"Hotkeys", L"PositionX", hotkey_list_x);
         write_float(path, L"Hotkeys", L"PositionY", hotkey_list_y);

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -80,6 +81,30 @@ namespace kopt
         bool valid{};
     };
 
+    struct AimTelemetry
+    {
+        std::uint64_t sequence{};
+        double world_time{};
+        bool active{};
+        bool target_valid{};
+        bool target_locked{};
+        bool prediction{};
+        bool intercept_solver{};
+        bool visible{};
+        std::uintptr_t target{};
+        std::int32_t target_team{};
+        std::int32_t bone_slot{-1};
+        std::array<wchar_t, 64> target_name{};
+        Vec3 camera{};
+        Vec3 raw_bone{};
+        Vec3 final_point{};
+        Vec3 velocity{};
+        float distance_m{};
+        float angular_error{};
+        float response{};
+        float flight_seconds{};
+    };
+
     enum class AlertKind : std::uint8_t
     {
         death,
@@ -123,9 +148,14 @@ namespace kopt
         bool player_aim_active{};
         bool dino_aim_active{};
         std::uintptr_t aim_target{};
+        AimTelemetry aim_debug{};
         double world_time{};
         std::uint64_t captures{};
         std::uint32_t rejected_reads{};
+        float runtime_update_ms{};
+        float discovery_ms{};
+        float refresh_ms{};
+        float oldest_actor_age_s{};
     };
 
     class ArkRuntime
@@ -141,6 +171,10 @@ namespace kopt
         [[nodiscard]] bool world_to_screen(const Vec3& world, float width, float height, Vec2& screen) const;
         [[nodiscard]] const std::wstring& status() const noexcept { return status_; }
         [[nodiscard]] const std::wstring& chams_status() const noexcept { return chams_status_; }
+        [[nodiscard]] std::size_t aim_trace_size() const noexcept { return aim_trace_count_; }
+        [[nodiscard]] const AimTelemetry& aim_trace_sample(std::size_t index) const noexcept;
+        void clear_aim_trace() noexcept;
+        bool export_aim_trace(const std::filesystem::path& path) const;
 
     private:
         struct ClassMeta
@@ -207,6 +241,7 @@ namespace kopt
         bool engine_object_live(std::uintptr_t address) const;
         bool engine_actor_live(const Actor& actor) const;
         void run_aim(Settings& settings, float delta_seconds);
+        void record_aim_sample(const Settings& settings, float delta_seconds);
         void run_camera(Settings& settings, float delta_seconds);
         void update_no_recoil(const Settings& settings);
         void restore_no_recoil() noexcept;
@@ -327,6 +362,12 @@ namespace kopt
         bool last_menu_open_{true};
         std::uintptr_t locked_target_{};
         float locked_target_occluded_seconds_{};
+        std::array<AimTelemetry, 600> aim_trace_{};
+        std::size_t aim_trace_head_{};
+        std::size_t aim_trace_count_{};
+        std::uint64_t aim_trace_sequence_{};
+        float aim_trace_elapsed_{};
+        float profiler_age_elapsed_{};
         Vec3 freecam_position_{};
         Vec3 freecam_rotation_{};
         Vec3 freecam_target_rotation_{};

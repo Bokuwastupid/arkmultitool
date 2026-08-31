@@ -26,7 +26,7 @@ $compileOverlay = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\overl
 $compilePayload = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\payload.cpp') + '" /Fo"' + (Join-Path $objects 'payload.obj') + '"'
 $compileRuntime = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\runtime.cpp') + '" /Fo"' + (Join-Path $objects 'runtime.obj') + '"'
 $payloadOutput = Join-Path $dist $PayloadName
-$linkPayload = 'link /nologo /dll /out:"' + $payloadOutput + '" /implib:"' + (Join-Path $build 'kopt_payload.lib') + '" "' + (Join-Path $objects 'config.obj') + '" "' + (Join-Path $objects 'overlay.obj') + '" "' + (Join-Path $objects 'payload.obj') + '" "' + (Join-Path $objects 'runtime.obj') + '" d3d11.lib d3dcompiler.lib dxgi.lib gdi32.lib user32.lib winmm.lib ole32.lib'
+$linkPayload = 'link /nologo /dll /out:"' + $payloadOutput + '" /implib:"' + (Join-Path $build 'kopt_payload.lib') + '" "' + (Join-Path $objects 'config.obj') + '" "' + (Join-Path $objects 'overlay.obj') + '" "' + (Join-Path $objects 'payload.obj') + '" "' + (Join-Path $objects 'runtime.obj') + '" d3d11.lib d3dcompiler.lib dxgi.lib gdi32.lib user32.lib winmm.lib ole32.lib dbghelp.lib'
 $buildInjector = 'cl ' + $common + ' "' + (Join-Path $projectRoot 'src\injector.cpp') + '" /Fe:"' + (Join-Path $dist 'kopt_injector.exe') + '" /Fo"' + (Join-Path $objects 'injector.obj') + '" /link /pdb:"' + (Join-Path $build 'kopt_injector.pdb') + '" advapi32.lib psapi.lib bcrypt.lib'
 $nativeCommand = '"' + $devCmd + '" -no_logo -arch=x64 -host_arch=x64 && ' + $compileConfig + ' && ' + $compileOverlay + ' && ' + $compilePayload + ' && ' + $compileRuntime + ' && ' + $linkPayload + ' && ' + $buildInjector
 & cmd.exe /d /s /c $nativeCommand

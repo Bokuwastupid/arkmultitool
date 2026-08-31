@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwctype>
+#include <fstream>
 #include <limits>
 #include <mmsystem.h>
 #include <numbers>
@@ -214,6 +215,73 @@ namespace
 
 namespace kopt
 {
+    void ArkRuntime::clear_aim_trace() noexcept
+    {
+        aim_trace_head_ = 0;
+        aim_trace_count_ = 0;
+        aim_trace_elapsed_ = 0.0F;
+    }
+
+    const AimTelemetry& ArkRuntime::aim_trace_sample(const std::size_t index) const noexcept
+    {
+        static const AimTelemetry empty{};
+        if (index >= aim_trace_count_) return empty;
+        return aim_trace_[(aim_trace_head_ + index) % aim_trace_.size()];
+    }
+
+    bool ArkRuntime::export_aim_trace(const std::filesystem::path& path) const
+    {
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) return false;
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        if (!output) return false;
+        output << "sequence,world_time,active,target_valid,target_locked,prediction,intercept,visible,"
+            "target,team,bone_slot,distance_m,angular_error,response,flight_seconds,"
+            "camera_x,camera_y,camera_z,raw_x,raw_y,raw_z,final_x,final_y,final_z,"
+            "velocity_x,velocity_y,velocity_z\n";
+        output.setf(std::ios::fixed);
+        output.precision(5);
+        for (std::size_t index = 0; index < aim_trace_count_; ++index)
+        {
+            const AimTelemetry& sample = aim_trace_sample(index);
+            output << sample.sequence << ',' << sample.world_time << ',' << sample.active << ','
+                << sample.target_valid << ',' << sample.target_locked << ',' << sample.prediction << ','
+                << sample.intercept_solver << ',' << sample.visible << ',' << sample.target << ','
+                << sample.target_team << ',' << sample.bone_slot << ',' << sample.distance_m << ','
+                << sample.angular_error << ',' << sample.response << ',' << sample.flight_seconds << ','
+                << sample.camera.x << ',' << sample.camera.y << ',' << sample.camera.z << ','
+                << sample.raw_bone.x << ',' << sample.raw_bone.y << ',' << sample.raw_bone.z << ','
+                << sample.final_point.x << ',' << sample.final_point.y << ',' << sample.final_point.z << ','
+                << sample.velocity.x << ',' << sample.velocity.y << ',' << sample.velocity.z << '\n';
+        }
+        return output.good();
+    }
+
+    void ArkRuntime::record_aim_sample(const Settings& settings, const float delta_seconds)
+    {
+        if (!settings.aim_lab_recording)
+        {
+            aim_trace_elapsed_ = 0.0F;
+            return;
+        }
+        aim_trace_elapsed_ += std::clamp(delta_seconds, 0.0F, 0.10F);
+        if (aim_trace_elapsed_ < (1.0F / 30.0F)) return;
+        aim_trace_elapsed_ = std::fmod(aim_trace_elapsed_, 1.0F / 30.0F);
+        AimTelemetry sample = snapshot_.aim_debug;
+        sample.sequence = ++aim_trace_sequence_;
+        if (aim_trace_count_ < aim_trace_.size())
+        {
+            aim_trace_[(aim_trace_head_ + aim_trace_count_) % aim_trace_.size()] = sample;
+            ++aim_trace_count_;
+        }
+        else
+        {
+            aim_trace_[aim_trace_head_] = sample;
+            aim_trace_head_ = (aim_trace_head_ + 1) % aim_trace_.size();
+        }
+    }
+
     void ArkRuntime::queue_freecam_mouse_delta(const long x, const long y) noexcept
     {
         freecam_mouse_x_.fetch_add(x, std::memory_order_relaxed);
@@ -298,9 +366,12 @@ namespace kopt
 
     void ArkRuntime::update(Settings& settings, const float delta_seconds)
     {
+        const auto update_started = std::chrono::steady_clock::now();
         if (!initialized_)
         {
             initialize();
+            snapshot_.runtime_update_ms = std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - update_started).count();
             return;
         }
 
@@ -318,22 +389,37 @@ namespace kopt
             std::chrono::duration<float, std::milli>(now - last_capture_).count() >= settings.discovery_interval_ms;
         if (discovery_due)
         {
+            const auto discovery_started = std::chrono::steady_clock::now();
             if (capture())
             {
                 last_capture_ = now;
                 last_live_refresh_ = now;
             }
+            snapshot_.discovery_ms = std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - discovery_started).count();
         }
         else if (last_live_refresh_.time_since_epoch().count() == 0 ||
             std::chrono::duration<float, std::milli>(now - last_live_refresh_).count() >= settings.refresh_interval_ms)
         {
+            const auto refresh_started = std::chrono::steady_clock::now();
             const float elapsed = last_live_refresh_.time_since_epoch().count() == 0 ?
                 settings.refresh_interval_ms * 0.001F : std::chrono::duration<float>(now - last_live_refresh_).count();
             refresh_known(std::clamp(elapsed, 0.0F, 0.5F));
             last_live_refresh_ = now;
+            snapshot_.refresh_ms = std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - refresh_started).count();
         }
         update_alerts(settings);
-        (void)delta_seconds;
+        profiler_age_elapsed_ += std::clamp(delta_seconds, 0.0F, 0.10F);
+        if (profiler_age_elapsed_ >= 1.0F)
+        {
+            profiler_age_elapsed_ = std::fmod(profiler_age_elapsed_, 1.0F);
+            snapshot_.oldest_actor_age_s = 0.0F;
+            for (const Actor& actor : snapshot_.actors)
+                snapshot_.oldest_actor_age_s = std::max(snapshot_.oldest_actor_age_s, actor.stale_seconds);
+        }
+        snapshot_.runtime_update_ms = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - update_started).count();
     }
 
     bool ArkRuntime::capture()
@@ -739,12 +825,16 @@ namespace kopt
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
             update_no_recoil(settings);
+            snapshot_.aim_debug = {};
+            snapshot_.aim_debug.world_time = snapshot_.world_time;
+            record_aim_sample(settings, delta_seconds);
             return;
         }
         run_camera(settings, delta_seconds);
         update_no_recoil(settings);
         update_no_sway(settings);
         run_aim(settings, delta_seconds);
+        record_aim_sample(settings, delta_seconds);
         update_chams(settings);
     }
 
@@ -1535,6 +1625,10 @@ namespace kopt
 
     void ArkRuntime::run_aim(Settings& settings, const float delta_seconds)
     {
+        snapshot_.aim_debug = {};
+        snapshot_.aim_debug.world_time = snapshot_.world_time;
+        snapshot_.aim_debug.prediction = settings.aim_prediction;
+        snapshot_.aim_debug.intercept_solver = settings.aim_intercept_solver;
         snapshot_.aim_active = false;
         snapshot_.player_aim_active = false;
         snapshot_.dino_aim_active = false;
@@ -1624,8 +1718,9 @@ namespace kopt
             return;
         }
         snapshot_.aim_active = true;
+        snapshot_.aim_debug.active = true;
 
-        const auto target_point = [&](const Actor& actor) {
+        const auto target_point = [&](const Actor& actor, const bool apply_prediction = true) {
             Vec3 point = actor.position;
             bool used_bone{};
             if (actor.kind == ActorKind::player && actor.bone_count > 0)
@@ -1725,7 +1820,7 @@ namespace kopt
                 }
                 point.z += actor.kind == ActorKind::player ? player_heights[category] : 80.0F;
             }
-            if (settings.aim_prediction)
+            if (settings.aim_prediction && apply_prediction)
             {
                 const float projectile_speed = settings.projectile_velocity_mps * 100.0F;
                 const Vec3 relative{point.x - snapshot_.camera.location.x,
@@ -1899,6 +1994,46 @@ namespace kopt
         const float response_scale = 1.0F + settings.aim_angle_boost * normalized_error;
         const float response = base_response >= 1.0F ? 1.0F :
             1.0F - std::pow(1.0F - base_response, response_scale);
+        const Vec3 raw_bone = target_point(*best, false);
+        AimTelemetry& aim_debug = snapshot_.aim_debug;
+        aim_debug.target_valid = true;
+        aim_debug.target_locked = locked_target_ == best->address;
+        aim_debug.visible = true;
+        aim_debug.target = best->address;
+        aim_debug.target_team = best->team;
+        if (!best->name.empty())
+            wcsncpy_s(aim_debug.target_name.data(), aim_debug.target_name.size(), best->name.c_str(), _TRUNCATE);
+        aim_debug.camera = snapshot_.camera.location;
+        aim_debug.raw_bone = raw_bone;
+        aim_debug.final_point = point;
+        aim_debug.velocity = best->velocity;
+        aim_debug.distance_m = distance(point, snapshot_.camera.location) / 100.0F;
+        aim_debug.angular_error = angular_error;
+        aim_debug.response = response;
+        if (settings.aim_prediction)
+        {
+            const float projectile_speed = settings.projectile_velocity_mps * 100.0F;
+            const Vec3 relative{raw_bone.x - snapshot_.camera.location.x,
+                raw_bone.y - snapshot_.camera.location.y, raw_bone.z - snapshot_.camera.location.z};
+            aim_debug.flight_seconds = settings.aim_intercept_solver ?
+                intercept_time(relative, best->velocity, projectile_speed) :
+                distance(raw_bone, snapshot_.camera.location) / projectile_speed;
+            aim_debug.flight_seconds = std::clamp(aim_debug.flight_seconds +
+                settings.prediction_latency_ms * 0.001F, 0.0F, 3.0F);
+        }
+        if (best->kind == ActorKind::player && best->bone_count > 0)
+        {
+            float nearest = std::numeric_limits<float>::max();
+            for (int slot = 0; slot < best->bone_count; ++slot)
+            {
+                const float separation = distance(best->bones[static_cast<std::size_t>(slot)], raw_bone);
+                if (separation < nearest)
+                {
+                    nearest = separation;
+                    aim_debug.bone_slot = slot;
+                }
+            }
+        }
         rotation.x += pitch_error * response;
         rotation.y += yaw_error * response;
         rotation.z = 0.0F;

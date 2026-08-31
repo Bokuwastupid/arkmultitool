@@ -142,6 +142,19 @@ Assert-True ($overlaySource.Contains('player_recently_rendered(') -and
     $overlaySource.Contains('settings.player_occluded_color') -and
     $overlaySource.Contains('preview_occluded_')) `
     'Visible/occluded player ESP separation or preview state is missing'
+Assert-True ($runtimeSource.Contains('record_aim_sample(') -and
+    $runtimeSource.Contains('export_aim_trace(') -and
+    $overlaySource.Contains('REPLAY SAMPLE')) `
+    'Aim Lab recorder, export or safe replay UI is missing'
+Assert-True ($overlaySource.Contains('COMMAND PALETTE') -and
+    $overlaySource.Contains('BIND CONFLICTS:') -and
+    $overlaySource.Contains('settings.ui_layouts') -and
+    $overlaySource.Contains('compact_navigation')) `
+    'Favorites/command palette, bind inspector or responsive layouts are missing'
+Assert-True ($payloadSource.Contains('MiniDumpWriteDump') -and
+    $payloadSource.Contains('SetUnhandledExceptionFilter') -and
+    $payloadSource.Contains('diagnostics_bundle_requested')) `
+    'Crash diagnostics bundle path is missing'
 Assert-True ($runtimeSource.Contains('dino_activated') -and $runtimeSource.Contains('dino_aim_toggle_active_')) `
     'Independent dino aim activation state is missing'
 Assert-True ($runtimeSource.Contains('snapshot_.world_address != active_world_') -and $runtimeSource.Contains('abandon_chams')) 'Reconnect-safe chams world guard is missing'
@@ -154,6 +167,8 @@ $cmake = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'CMakeLists.txt')
 $buildScript = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'build.ps1')
 Assert-True (-not $cmake.Contains('graphics_config.cpp')) 'graphics_config.cpp is still in CMake payload sources'
 Assert-True (-not $buildScript.Contains('graphics_config.obj')) 'graphics_config.obj is still linked by build.ps1'
+Assert-True ($cmake.Contains('dbghelp') -and $buildScript.Contains('dbghelp.lib')) `
+    'DbgHelp is not linked for native minidump support'
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'src\graphics_config.cpp'))) 'Retired game INI implementation still exists'
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'include\kopt\graphics_config.hpp'))) 'Retired game INI header still exists'
 

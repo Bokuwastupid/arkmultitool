@@ -171,6 +171,7 @@ namespace
             {L"alerts.group", L"Enemy group (3+)", L"Alerts", &S::alert_enemy_group},
             {L"alerts.sound", L"Notification sound", L"Alerts", &S::alert_sound},
             {L"runtime.debug", L"Runtime debug panel", L"Runtime", &S::debug_panel},
+            {L"runtime.aim_lab", L"Record Aim Lab trace", L"Diagnostics", &S::aim_lab_recording},
             {L"hotkeys.list", L"Show active bind list", L"Hotkeys", &S::show_hotkey_list}
         };
         return catalog;
@@ -592,6 +593,7 @@ namespace kopt
     void Overlay::render(IDXGISwapChain* swap_chain, Settings& settings, ArkRuntime& runtime,
         InputState& input, const std::filesystem::path& settings_path)
     {
+        const auto overlay_started = std::chrono::steady_clock::now();
         if (!ensure_device(swap_chain)) return;
         input.begin_frame();
         accent = settings.menu_accent_color;
@@ -604,9 +606,37 @@ namespace kopt
         if (settings.esp_enabled) draw_esp(settings, runtime);
         if (settings.alerts_enabled) draw_alerts(settings, runtime);
         if (settings.show_hotkey_list) draw_hotkey_list(settings, runtime);
-        if (settings.menu_open) draw_menu(settings, runtime, input, settings_path);
+        if (settings.menu_open)
+        {
+            const float menu_scale = std::clamp(settings.ui_scale, 0.75F, 1.50F);
+            const std::size_t menu_vertex_begin = vertices_.size();
+            const float physical_width = width_;
+            const float physical_height = height_;
+            const int physical_mouse_x = input.frame_mouse_x;
+            const int physical_mouse_y = input.frame_mouse_y;
+            width_ = physical_width / menu_scale;
+            height_ = physical_height / menu_scale;
+            input.frame_mouse_x = static_cast<int>(std::lround(static_cast<float>(physical_mouse_x) / menu_scale));
+            input.frame_mouse_y = static_cast<int>(std::lround(static_cast<float>(physical_mouse_y) / menu_scale));
+            draw_menu(settings, runtime, input, settings_path);
+            width_ = physical_width;
+            height_ = physical_height;
+            input.frame_mouse_x = physical_mouse_x;
+            input.frame_mouse_y = physical_mouse_y;
+            for (std::size_t index = menu_vertex_begin; index < vertices_.size(); ++index)
+            {
+                vertices_[index].x *= menu_scale;
+                vertices_[index].y *= menu_scale;
+            }
+        }
         if (settings.debug_panel && !settings.menu_open) draw_debug(runtime);
+        last_vertex_count_ = vertices_.size();
+        const auto flush_started = std::chrono::steady_clock::now();
+        last_overlay_build_ms_ = std::chrono::duration<float, std::milli>(
+            flush_started - overlay_started).count();
         flush();
+        last_overlay_flush_ms_ = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - flush_started).count();
     }
 
     void Overlay::update_feature_hotkeys(Settings& settings)
@@ -1537,6 +1567,35 @@ namespace kopt
         const std::filesystem::path& settings_path)
     {
         settings_context_ = &settings;
+        const int requested_layout = std::clamp(settings.active_layout, 0, 3);
+        if (loaded_layout_ != requested_layout)
+        {
+            if (loaded_layout_ >= 0)
+            {
+                UiLayout& previous = settings.ui_layouts[static_cast<std::size_t>(loaded_layout_)];
+                previous.menu_width = settings.menu_width;
+                previous.menu_height = settings.menu_height;
+                previous.menu_x = menu_left_ / std::max(1.0F, width_ - settings.menu_width);
+                previous.menu_y = menu_top_ / std::max(1.0F, height_ - settings.menu_height);
+                previous.ui_scale = settings.ui_scale;
+                previous.hotkey_x = settings.hotkey_list_x;
+                previous.hotkey_y = settings.hotkey_list_y;
+                previous.radar_x = settings.radar_x;
+                previous.radar_y = settings.radar_y;
+            }
+            const UiLayout& selected = settings.ui_layouts[static_cast<std::size_t>(requested_layout)];
+            settings.menu_width = selected.menu_width;
+            settings.menu_height = selected.menu_height;
+            settings.ui_scale = selected.ui_scale;
+            settings.hotkey_list_x = selected.hotkey_x;
+            settings.hotkey_list_y = selected.hotkey_y;
+            settings.radar_x = selected.radar_x;
+            settings.radar_y = selected.radar_y;
+            menu_left_ = selected.menu_x * std::max(1.0F, width_ - settings.menu_width);
+            menu_top_ = selected.menu_y * std::max(1.0F, height_ - settings.menu_height);
+            menu_position_initialized_ = true;
+            loaded_layout_ = requested_layout;
+        }
         if (open_combo_ != -1 && active_combo_rect_valid_ && input.frame_left_pressed &&
             !contains(active_combo_rect_, input.frame_mouse_x, input.frame_mouse_y) &&
             !contains(active_combo_control_rect_, input.frame_mouse_x, input.frame_mouse_y))
@@ -1607,19 +1666,33 @@ namespace kopt
         const float left = menu_left_;
         const float top = menu_top_;
         const Rect frame{left, top, left + menu_width, top + menu_height};
+        const bool compact_navigation = menu_width < 900.0F;
+        const float sidebar_width = compact_navigation ? 164.0F : 188.0F;
+        UiLayout& active_layout = settings.ui_layouts[static_cast<std::size_t>(requested_layout)];
+        active_layout.menu_width = menu_width;
+        active_layout.menu_height = menu_height;
+        active_layout.menu_x = menu_left_ / std::max(1.0F, width_ - menu_width);
+        active_layout.menu_y = menu_top_ / std::max(1.0F, height_ - menu_height);
+        active_layout.ui_scale = settings.ui_scale;
+        active_layout.hotkey_x = settings.hotkey_list_x;
+        active_layout.hotkey_y = settings.hotkey_list_y;
+        active_layout.radar_x = settings.radar_x;
+        active_layout.radar_y = settings.radar_y;
         current_menu_bottom_ = frame.bottom;
         fill(frame, panel);
         stroke(frame, {0.220F, 0.145F, 0.365F, 1.0F}, 1.0F);
-        fill({left, top, left + 188.0F, top + menu_height}, {0.025F, 0.018F, 0.037F, 0.99F});
+        fill({left, top, left + sidebar_width, top + menu_height}, {0.025F, 0.018F, 0.037F, 0.99F});
         fill({left, top, left + 4.0F, top + menu_height}, accent);
-        text(L"KOPT", {left + 24.0F, top + 22.0F, left + 164.0F, top + 55.0F}, text_primary, 25.0F);
-        text(L"INTERNAL / PROTON", {left + 24.0F, top + 54.0F, left + 170.0F, top + 76.0F}, accent, 10.0F);
+        text(L"KOPT", {left + 20.0F, top + 22.0F, left + sidebar_width - 16.0F, top + 55.0F}, text_primary, 25.0F);
+        text(compact_navigation ? L"INTERNAL" : L"INTERNAL / PROTON",
+            {left + 20.0F, top + 54.0F, left + sidebar_width - 12.0F, top + 76.0F}, accent, 10.0F);
 
-        static constexpr const wchar_t* tabs[]{L"Aim", L"ESP", L"Camera", L"Visuals", L"Chams", L"Bindings", L"Hotkeys", L"Alerts"};
+        static constexpr const wchar_t* tabs[]{L"Aim", L"ESP", L"Camera", L"Visuals", L"Chams",
+            L"Bindings", L"Hotkeys", L"Alerts", L"Diagnostics"};
         float tab_y = top + 92.0F;
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < 9; ++i)
         {
-            if (button(tabs[i], {left + 16.0F, tab_y, left + 172.0F, tab_y + 38.0F}, active_tab_ == i, input))
+            if (button(tabs[i], {left + 14.0F, tab_y, left + sidebar_width - 14.0F, tab_y + 38.0F}, active_tab_ == i, input))
             {
                 active_tab_ = i;
                 open_combo_ = -1;
@@ -1627,13 +1700,22 @@ namespace kopt
             tab_y += 40.0F;
         }
 
-        text(key_name(settings.menu_key) + L"  Toggle menu", {left + 24.0F, top + menu_height - 66.0F, left + 180.0F, top + menu_height - 45.0F}, text_secondary, 11.0F);
-        text(key_name(settings.unload_key) + L"  Unload payload", {left + 24.0F, top + menu_height - 43.0F, left + 180.0F, top + menu_height - 22.0F}, text_secondary, 11.0F);
+        text(key_name(settings.menu_key) + L"  Menu", {left + 20.0F, top + menu_height - 66.0F,
+            left + sidebar_width - 8.0F, top + menu_height - 45.0F}, text_secondary, 10.0F);
+        text(key_name(settings.unload_key) + L"  Unload", {left + 20.0F, top + menu_height - 43.0F,
+            left + sidebar_width - 8.0F, top + menu_height - 22.0F}, text_secondary, 10.0F);
 
-        const float content_left = left + 220.0F;
+        const float content_left = left + sidebar_width + 32.0F;
         content_width_ = std::max(480.0F, frame.right - 28.0F - content_left);
         float y = top + 78.0F;
         text(tabs[active_tab_], {content_left, top + 24.0F, frame.right - 24.0F, top + 58.0F}, text_primary, 24.0F);
+        if (button(command_palette_open_ ? L"CLOSE SEARCH" : L"FAV / SEARCH",
+            {frame.right - 150.0F, top + 20.0F, frame.right - 28.0F, top + 54.0F},
+            command_palette_open_, input))
+        {
+            command_palette_open_ = !command_palette_open_;
+            if (command_palette_open_) active_text_input_ = 90;
+        }
         line(content_left, top + 62.0F, frame.right - 28.0F, top + 62.0F, {0.220F, 0.145F, 0.365F, 1.0F});
 
         if (active_tab_ == 0)
@@ -2225,6 +2307,13 @@ namespace kopt
         }
         else if (active_tab_ == 3)
         {
+            static constexpr const wchar_t* layouts[]{L"Everyday", L"Testing", L"Freecam", L"Streamer"};
+            combo(L"Active menu layout", settings.active_layout, layouts, std::size(layouts), 32,
+                content_left, y, input);
+            slider(L"UI scale", settings.ui_scale, 0.75F, 1.50F, content_left, y, input, L" x");
+            text(L"Each layout stores menu size/position, UI scale, hotkey list and radar position independently.",
+                {content_left + 2.0F, y, frame.right - 32.0F, y + 38.0F}, text_secondary, 10.0F);
+            y += 42.0F;
             checkbox(L"Runtime debug panel", settings.debug_panel, content_left, y, input);
             slider(L"Live actor refresh", settings.refresh_interval_ms, 16.0F, 500.0F, content_left, y, input, L" ms");
             slider(L"World actor discovery", settings.discovery_interval_ms, 250.0F, 5000.0F, content_left, y, input, L" ms");
@@ -2287,6 +2376,7 @@ namespace kopt
                 {
                     loaded.menu_open = true;
                     settings = std::move(loaded);
+                    loaded_layout_ = -1;
                     profile_name_ = safe_name;
                     toast_ = L"Profile loaded: " + safe_name;
                 }
@@ -2438,7 +2528,27 @@ namespace kopt
                     state != feature_binding_runtime_.end() && state->active,
                     binding.show_in_list, false, true});
             }
-            constexpr int entries_per_page = 6;
+            std::unordered_map<std::uint32_t, int> bind_usage;
+            for (const HotkeyEntry& entry : entries)
+                if (entry.key != 0) ++bind_usage[entry.key];
+            const int conflict_keys = static_cast<int>(std::count_if(bind_usage.begin(), bind_usage.end(),
+                [](const auto& item) { return item.second > 1; }));
+            if (conflict_keys > 0)
+            {
+                text(L"BIND CONFLICTS: " + std::to_wstring(conflict_keys),
+                    {content_left + 2.0F, y, content_left + 220.0F, y + 28.0F}, warning, 11.0F);
+                if (button(L"Open rebind panel", {content_left + 232.0F, y,
+                    content_left + 392.0F, y + 28.0F}, false, input)) active_tab_ = 5;
+                y += 36.0F;
+            }
+            else
+            {
+                text(L"No bind conflicts", {content_left + 2.0F, y,
+                    frame.right - 32.0F, y + 24.0F}, success, 10.0F);
+                y += 28.0F;
+            }
+            const int entries_per_page = std::clamp(
+                static_cast<int>((frame.bottom - 88.0F - y) / 50.0F), 1, 6);
             const int page_count = std::max(1, static_cast<int>((entries.size() + entries_per_page - 1) / entries_per_page));
             hotkey_page_ = std::clamp(hotkey_page_, 0, page_count - 1);
             const int begin = hotkey_page_ * entries_per_page;
@@ -2452,9 +2562,12 @@ namespace kopt
             for (int index = begin; index < end; ++index)
             {
                 const HotkeyEntry& entry = entries[static_cast<std::size_t>(index)];
+                const bool conflict = entry.key != 0 && bind_usage[entry.key] > 1;
                 const Rect row{content_left, y, content_left + content_width_, y + 44.0F};
-                fill(row, entry.active ? Color{accent_dim.r, accent_dim.g, accent_dim.b, 0.72F} : surface);
-                fill({row.left, row.top, row.left + 3.0F, row.bottom}, entry.active ? success : accent_dim);
+                fill(row, conflict ? Color{0.20F, 0.12F, 0.04F, 0.96F} :
+                    (entry.active ? Color{accent_dim.r, accent_dim.g, accent_dim.b, 0.72F} : surface));
+                fill({row.left, row.top, row.left + 3.0F, row.bottom},
+                    conflict ? warning : (entry.active ? success : accent_dim));
                 text(entry.label, {row.left + 12.0F, row.top + 3.0F, row.left + 245.0F, row.top + 24.0F},
                     text_primary, 12.0F);
                 text(entry.category + L" · " + key_name(entry.key) + L" · " +
@@ -2462,6 +2575,9 @@ namespace kopt
                         entry.mode == 1 ? L"Toggle" : L"Always"),
                     {row.left + 12.0F, row.top + 22.0F, row.left + 350.0F, row.bottom - 2.0F},
                     text_secondary, 10.0F);
+                if (conflict)
+                    text(L"CONFLICT", {row.left + 350.0F, row.top + 4.0F,
+                        row.right - 164.0F, row.top + 22.0F}, warning, 9.0F, TextAlign::right);
                 if (entry.visibility_control && button(entry.shown ? L"Eye" : L"Hidden",
                     {row.right - 158.0F, row.top + 7.0F, row.right - 82.0F, row.bottom - 7.0F}, entry.shown, input))
                 {
@@ -2493,7 +2609,7 @@ namespace kopt
                     {content_left + 250.0F, y, frame.right - 32.0F, y + 32.0F}, text_secondary, 11.0F);
             }
         }
-        else
+        else if (active_tab_ == 7)
         {
             if (button(L"Types", {content_left, y, content_left + 162.0F, y + 34.0F},
                 alert_settings_page_ == 0, input)) alert_settings_page_ = 0;
@@ -2528,12 +2644,105 @@ namespace kopt
                     runtime.clear_alert_history();
             }
         }
+        else
+        {
+            checkbox(L"Record Aim Lab trace (30 Hz / 20 seconds)", settings.aim_lab_recording,
+                content_left, y, input);
+            const std::size_t trace_size = runtime.aim_trace_size();
+            if (button(L"LIVE", {content_left, y, content_left + 92.0F, y + 32.0F}, aim_replay_live_, input))
+                aim_replay_live_ = true;
+            if (button(L"Previous", {content_left + 102.0F, y, content_left + 202.0F, y + 32.0F}, false, input) &&
+                trace_size != 0)
+            {
+                aim_replay_live_ = false;
+                aim_replay_index_ = aim_replay_index_ == 0 ? 0 : aim_replay_index_ - 1;
+            }
+            if (button(L"Next", {content_left + 212.0F, y, content_left + 302.0F, y + 32.0F}, false, input) &&
+                trace_size != 0)
+            {
+                aim_replay_live_ = false;
+                aim_replay_index_ = std::min(aim_replay_index_ + 1, trace_size - 1);
+            }
+            text(std::to_wstring(trace_size) + L" / 600 samples",
+                {content_left + 316.0F, y, frame.right - 30.0F, y + 32.0F}, text_secondary, 11.0F);
+            y += 44.0F;
+
+            const AimTelemetry* sample = &runtime.snapshot().aim_debug;
+            if (!aim_replay_live_ && trace_size != 0)
+            {
+                aim_replay_index_ = std::min(aim_replay_index_, trace_size - 1);
+                sample = &runtime.aim_trace_sample(aim_replay_index_);
+            }
+            else if (trace_size != 0) aim_replay_index_ = trace_size - 1;
+
+            const Rect lab{content_left, y, frame.right - 30.0F, y + 236.0F};
+            fill(lab, surface);
+            stroke(lab, sample->target_valid ? success : accent_dim);
+            text(aim_replay_live_ ? L"LIVE TARGET STATE" :
+                L"REPLAY SAMPLE " + std::to_wstring(sample->sequence),
+                {lab.left + 14.0F, lab.top + 8.0F, lab.right - 14.0F, lab.top + 31.0F}, accent, 11.0F);
+            const std::wstring recorded_name{sample->target_name.data()};
+            const std::wstring target = sample->target_valid ?
+                (recorded_name.empty() ? L"Unknown target" : recorded_name) : L"No eligible target";
+            text(target, {lab.left + 14.0F, lab.top + 34.0F, lab.right - 14.0F, lab.top + 58.0F},
+                text_primary, 14.0F);
+            text(L"Aim: " + std::wstring(sample->active ? L"ACTIVE" : L"IDLE") +
+                L"   Prediction: " + (sample->prediction ? L"ON" : L"OFF") +
+                L"   LOS: " + (sample->visible ? L"VISIBLE" : L"NO TARGET"),
+                {lab.left + 14.0F, lab.top + 62.0F, lab.right - 14.0F, lab.top + 86.0F},
+                sample->target_valid ? success : text_secondary, 11.0F);
+            text(L"Bone slot: " + std::to_wstring(sample->bone_slot) +
+                L"   Distance: " + fixed(sample->distance_m, 1) + L" m   Angular error: " +
+                fixed(sample->angular_error, 2) + L" deg",
+                {lab.left + 14.0F, lab.top + 91.0F, lab.right - 14.0F, lab.top + 115.0F},
+                text_secondary, 11.0F);
+            text(L"Response: " + fixed(sample->response, 3) + L"   Flight: " +
+                fixed(sample->flight_seconds * 1000.0F, 1) + L" ms   Velocity: " +
+                fixed(std::sqrt(sample->velocity.x * sample->velocity.x +
+                    sample->velocity.y * sample->velocity.y + sample->velocity.z * sample->velocity.z) / 100.0F, 1) + L" m/s",
+                {lab.left + 14.0F, lab.top + 120.0F, lab.right - 14.0F, lab.top + 144.0F},
+                text_secondary, 11.0F);
+            text(L"Raw bone:  " + fixed(sample->raw_bone.x, 1) + L", " + fixed(sample->raw_bone.y, 1) +
+                L", " + fixed(sample->raw_bone.z, 1),
+                {lab.left + 14.0F, lab.top + 151.0F, lab.right - 14.0F, lab.top + 175.0F},
+                text_secondary, 10.0F);
+            text(L"Final point: " + fixed(sample->final_point.x, 1) + L", " + fixed(sample->final_point.y, 1) +
+                L", " + fixed(sample->final_point.z, 1),
+                {lab.left + 14.0F, lab.top + 178.0F, lab.right - 14.0F, lab.top + 202.0F},
+                sample->prediction ? warning : text_secondary, 10.0F);
+            text(L"Replay never calls Unreal; it only reads the recorded POD snapshot.",
+                {lab.left + 14.0F, lab.top + 205.0F, lab.right - 14.0F, lab.bottom - 5.0F},
+                text_secondary, 10.0F);
+            y += 250.0F;
+
+            if (button(L"Export aim_trace.csv", {content_left, y, content_left + 174.0F, y + 36.0F}, true, input))
+            {
+                const bool exported = runtime.export_aim_trace(settings_path.parent_path() /
+                    L"diagnostics" / L"aim_trace.csv");
+                toast_ = exported ? L"Aim trace exported" : L"Aim trace export failed";
+                toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            }
+            if (button(L"Clear trace", {content_left + 184.0F, y, content_left + 304.0F, y + 36.0F}, false, input))
+            {
+                runtime.clear_aim_trace();
+                aim_replay_live_ = true;
+                aim_replay_index_ = 0;
+            }
+            if (button(L"Create diagnostics bundle",
+                {content_left + 314.0F, y, frame.right - 30.0F, y + 36.0F}, true, input))
+            {
+                input.diagnostics_bundle_requested.store(true, std::memory_order_release);
+                toast_ = L"Diagnostics bundle requested";
+                toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            }
+        }
 
         fill({content_left, frame.bottom - 54.0F, frame.right - 28.0F, frame.bottom - 20.0F}, surface);
         text(runtime.status(), {content_left + 12.0F, frame.bottom - 49.0F, frame.right - 40.0F, frame.bottom - 24.0F},
             runtime.snapshot().local_valid ? success : warning, 12.0F);
         if (!toast_.empty() && std::chrono::steady_clock::now() < toast_until_)
             text(toast_, {frame.right - 220.0F, top + 28.0F, frame.right - 30.0F, top + 55.0F}, success, 12.0F, TextAlign::right);
+        if (command_palette_open_) draw_command_palette(settings, input, frame);
         if (combo_popup_.visible)
         {
             fill(combo_popup_.rect, {0.025F, 0.018F, 0.037F, 0.995F});
@@ -2555,6 +2764,96 @@ namespace kopt
         const Rect grip{frame.right - 20.0F, frame.bottom - 20.0F, frame.right - 5.0F, frame.bottom - 5.0F};
         line(grip.left + 4.0F, grip.bottom, grip.right, grip.top + 4.0F, accent_dim, 1.5F);
         line(grip.left + 9.0F, grip.bottom, grip.right, grip.top + 9.0F, accent, 1.5F);
+    }
+
+    void Overlay::draw_command_palette(Settings& settings, InputState& input, const Rect& menu_frame)
+    {
+        const float palette_width = std::min(650.0F, menu_frame.right - menu_frame.left - 48.0F);
+        const float left = menu_frame.left + (menu_frame.right - menu_frame.left - palette_width) * 0.5F;
+        const float top = menu_frame.top + 72.0F;
+        const Rect popup{left, top, left + palette_width,
+            std::min(menu_frame.bottom - 64.0F, top + 470.0F)};
+        fill(popup, {0.025F, 0.018F, 0.037F, 0.998F});
+        stroke(popup, accent, 1.5F);
+        fill({popup.left, popup.top, popup.right, popup.top + 4.0F}, accent);
+        text(L"COMMAND PALETTE", {popup.left + 18.0F, popup.top + 10.0F,
+            popup.right - 18.0F, popup.top + 36.0F}, text_primary, 14.0F);
+        text(L"Favorites stay pinned above matching settings", {popup.left + 18.0F, popup.top + 34.0F,
+            popup.right - 18.0F, popup.top + 56.0F}, text_secondary, 10.0F);
+
+        const float previous_width = content_width_;
+        content_width_ = palette_width - 34.0F;
+        float search_y = popup.top + 60.0F;
+        if (text_input(L"Search name, category or setting ID", command_search_, 90,
+            popup.left + 16.0F, search_y, input, 96)) command_page_ = 0;
+        content_width_ = previous_width;
+
+        const std::wstring query = lower_copy(command_search_);
+        std::vector<const FeatureDescriptor*> results;
+        for (const FeatureDescriptor& descriptor : feature_catalog())
+        {
+            const bool matches = query.empty() ||
+                lower_copy(descriptor.label).find(query) != std::wstring::npos ||
+                lower_copy(descriptor.category).find(query) != std::wstring::npos ||
+                lower_copy(descriptor.id).find(query) != std::wstring::npos;
+            if (matches) results.push_back(&descriptor);
+        }
+        std::unordered_set<std::wstring> favorite_ids;
+        for (std::wstring id : exact_tokens(settings.favorite_features))
+            favorite_ids.insert(lower_copy(std::move(id)));
+        std::stable_sort(results.begin(), results.end(), [&](const auto* first, const auto* second) {
+            const bool first_favorite = favorite_ids.contains(lower_copy(first->id));
+            const bool second_favorite = favorite_ids.contains(lower_copy(second->id));
+            if (first_favorite != second_favorite) return first_favorite;
+            const int category_order = lower_copy(first->category).compare(lower_copy(second->category));
+            return category_order != 0 ? category_order < 0 : lower_copy(first->label) < lower_copy(second->label);
+        });
+
+        constexpr int rows_per_page = 6;
+        const int page_count = std::max(1,
+            static_cast<int>((results.size() + rows_per_page - 1) / rows_per_page));
+        command_page_ = std::clamp(command_page_, 0, page_count - 1);
+        const int begin = command_page_ * rows_per_page;
+        const int end = std::min(static_cast<int>(results.size()), begin + rows_per_page);
+        float row_y = search_y + 4.0F;
+        if (results.empty())
+            text(L"No matching setting", {popup.left + 18.0F, row_y,
+                popup.right - 18.0F, row_y + 42.0F}, text_secondary, 12.0F);
+        for (int index = begin; index < end; ++index)
+        {
+            const FeatureDescriptor& descriptor = *results[static_cast<std::size_t>(index)];
+            bool& value = settings.*descriptor.member;
+            const bool favorite = favorite_ids.contains(lower_copy(descriptor.id));
+            const Rect row{popup.left + 16.0F, row_y, popup.right - 16.0F, row_y + 44.0F};
+            fill(row, value ? Color{accent_dim.r, accent_dim.g, accent_dim.b, 0.72F} : surface);
+            fill({row.left, row.top, row.left + 3.0F, row.bottom}, value ? success : accent_dim);
+            text(descriptor.label, {row.left + 12.0F, row.top + 2.0F,
+                row.right - 154.0F, row.top + 23.0F}, text_primary, 11.0F);
+            text(std::wstring(descriptor.category) + L" · " + descriptor.id,
+                {row.left + 12.0F, row.top + 21.0F, row.right - 154.0F, row.bottom - 1.0F},
+                text_secondary, 9.0F);
+            if (button(favorite ? L"FAV" : L"STAR",
+                {row.right - 144.0F, row.top + 7.0F, row.right - 76.0F, row.bottom - 7.0F},
+                favorite, input))
+                set_exact_token(settings.favorite_features, descriptor.id, !favorite);
+            if (button(value ? L"ON" : L"OFF",
+                {row.right - 68.0F, row.top + 7.0F, row.right - 8.0F, row.bottom - 7.0F}, value, input))
+                value = !value;
+            row_y += 50.0F;
+        }
+        if (page_count > 1)
+        {
+            const float navigation_y = popup.bottom - 40.0F;
+            if (button(L"Previous", {popup.left + 16.0F, navigation_y,
+                popup.left + 116.0F, navigation_y + 30.0F}, true, input))
+                command_page_ = (command_page_ + page_count - 1) % page_count;
+            if (button(L"Next", {popup.left + 126.0F, navigation_y,
+                popup.left + 216.0F, navigation_y + 30.0F}, true, input))
+                command_page_ = (command_page_ + 1) % page_count;
+            text(std::to_wstring(command_page_ + 1) + L" / " + std::to_wstring(page_count),
+                {popup.left + 230.0F, navigation_y, popup.right - 18.0F, navigation_y + 30.0F},
+                text_secondary, 10.0F, TextAlign::right);
+        }
     }
 
     void Overlay::draw_esp_preview(Settings& settings, const float x, const float y, InputState& input)
@@ -2747,7 +3046,7 @@ namespace kopt
     void Overlay::draw_debug(const ArkRuntime& runtime)
     {
         const Snapshot& snapshot = runtime.snapshot();
-        const Rect rect{width_ - 330.0F, 18.0F, width_ - 18.0F, 112.0F};
+        const Rect rect{width_ - 350.0F, 18.0F, width_ - 18.0F, 142.0F};
         fill(rect, {0.02F, 0.03F, 0.05F, 0.82F});
         text(L"KOPT INTERNAL", {rect.left + 12.0F, rect.top + 8.0F, rect.right - 12.0F, rect.top + 30.0F}, accent, 12.0F);
         text(runtime.status(), {rect.left + 12.0F, rect.top + 31.0F, rect.right - 12.0F, rect.top + 52.0F}, text_primary, 12.0F);
@@ -2756,8 +3055,17 @@ namespace kopt
         text(L"Aim " + std::wstring(snapshot.aim_active ? L"ACTIVE" : L"idle") +
             L"  armed=" + (snapshot.aim_armed ? L"yes" : L"no") +
             L"  target=" + (snapshot.aim_target != 0 ? L"yes" : L"no"),
-            {rect.left + 12.0F, rect.top + 72.0F, rect.right - 12.0F, rect.bottom - 5.0F},
+            {rect.left + 12.0F, rect.top + 72.0F, rect.right - 12.0F, rect.top + 96.0F},
             snapshot.aim_active ? warning : text_secondary, 11.0F);
+        text(L"Runtime " + fixed(snapshot.runtime_update_ms, 2) + L" ms  |  UI " +
+            fixed(last_overlay_build_ms_, 2) + L" + " + fixed(last_overlay_flush_ms_, 2) +
+            L" ms  |  " + std::to_wstring(last_vertex_count_) + L" vertices",
+            {rect.left + 12.0F, rect.top + 94.0F, rect.right - 12.0F, rect.top + 116.0F},
+            snapshot.runtime_update_ms > 8.0F ? warning : text_secondary, 10.0F);
+        text(L"Discovery " + fixed(snapshot.discovery_ms, 2) + L" ms  |  Refresh " +
+            fixed(snapshot.refresh_ms, 2) + L" ms  |  Oldest " + fixed(snapshot.oldest_actor_age_s, 2) + L" s",
+            {rect.left + 12.0F, rect.top + 114.0F, rect.right - 12.0F, rect.bottom - 4.0F},
+            text_secondary, 10.0F);
     }
 
     bool Overlay::flush()

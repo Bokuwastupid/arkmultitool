@@ -92,6 +92,8 @@ point `STEAM_COMPAT_DATA_PATH` at that prefix instead.
 - Player corpses remain available to Dead ESP but are excluded from radius alerts, enemy groups, threat/radar counts, summaries and aim eligibility.
 - Moving-target prediction can solve the true projectile intercept for lateral and diagonal movement; Angle catch-up increases response only at larger angular errors and preserves the configured smoothing near the target.
 - Player ESP can keep Relation/Status colors for recently visible players while using a separate configurable color for players occluded by geometry. The side preview can switch between Visible and Occluded states.
+- Diagnostics includes a bounded 30 Hz Aim Lab trace, live/replay target inspection, CSV export and a manual crash-diagnostics bundle. Unhandled failures write a minidump without taking the runtime mutex.
+- The command palette searches every bindable setting and pins Favorites first. Hotkeys highlights duplicate keys, while four saved layouts retain menu scale/position, radar and active-bind positions.
 - Drag the lower-right menu grip to resize it; the saved width and height are part of the local configuration.
 - `WASD` and `Q/E` or `Ctrl/Space` — move the free camera.
 - `Shift` — freecam sprint; mouse wheel changes its live speed.
