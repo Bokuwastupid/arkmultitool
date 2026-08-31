@@ -200,6 +200,7 @@ namespace kopt
         bool active_combo_rect_valid_{};
         bool preview_position_initialized_{};
         bool preview_window_dragging_{};
+        bool preview_occluded_{};
         float preview_left_{};
         float preview_top_{};
         float preview_drag_offset_x_{};

@@ -90,6 +90,8 @@ point `STEAM_COMPAT_DATA_PATH` at that prefix instead.
 - `ESP > Search > Structure catalog` accumulates every live structure class (including mod structures), supports name/class search and an exact saved whitelist.
 - Local profiles can be deleted from the Runtime profile manager with a protected two-click confirmation; the base configuration is never a deletion target.
 - Player corpses remain available to Dead ESP but are excluded from radius alerts, enemy groups, threat/radar counts, summaries and aim eligibility.
+- Moving-target prediction can solve the true projectile intercept for lateral and diagonal movement; Angle catch-up increases response only at larger angular errors and preserves the configured smoothing near the target.
+- Player ESP can keep Relation/Status colors for recently visible players while using a separate configurable color for players occluded by geometry. The side preview can switch between Visible and Occluded states.
 - Drag the lower-right menu grip to resize it; the saved width and height are part of the local configuration.
 - `WASD` and `Q/E` or `Ctrl/Space` — move the free camera.
 - `Shift` — freecam sprint; mouse wheel changes its live speed.

@@ -49,9 +49,11 @@ namespace kopt
         float aim_fov{12.0F};
         float aim_distance_m{500.0F};
         float aim_smoothing{5.0F};
+        float aim_angle_boost{1.75F};
         float mounted_aim_fov{14.0F};
         float mounted_aim_smoothing{6.0F};
         bool aim_prediction{};
+        bool aim_intercept_solver{true};
         float projectile_velocity_mps{300.0F};
         float projectile_gravity_mps2{9.81F};
         float prediction_latency_ms{};
@@ -107,6 +109,7 @@ namespace kopt
         bool show_knocked_out_players{true};
         bool show_dead_players{};
         bool show_player_status{true};
+        bool player_occluded_color_enabled{true};
         bool show_player_labels{true};
         bool show_dino_labels{true};
         bool show_structure_labels{true};
@@ -146,6 +149,7 @@ namespace kopt
         float esp_skeleton_thickness{1.2F};
         float esp_label_size{13.0F};
         float esp_icon_size{30.0F};
+        float player_visibility_grace_ms{180.0F};
         float radar_size{180.0F};
         float radar_range_m{300.0F};
         float threat_distance_m{300.0F};
@@ -218,6 +222,7 @@ namespace kopt
         Color player_sleeping_color{0.38F, 0.62F, 1.0F, 1.0F};
         Color player_knocked_out_color{1.0F, 0.72F, 0.30F, 1.0F};
         Color player_dead_color{0.92F, 0.22F, 0.34F, 1.0F};
+        Color player_occluded_color{0.58F, 0.31F, 0.92F, 1.0F};
         Color wild_color{1.0F, 0.72F, 0.30F, 1.0F};
         Color structure_color{0.35F, 0.78F, 1.0F, 1.0F};
         Color health_color{0.28F, 0.92F, 0.42F, 1.0F};

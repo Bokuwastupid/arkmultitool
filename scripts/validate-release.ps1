@@ -134,6 +134,14 @@ Assert-True ($runtimeSource.Contains('const bool dead = actor_is_dead(actor)') -
     $runtimeSource.Contains('if (!dead && distance_m <= settings.alert_radius_m)') -and
     $overlaySource.Contains('actor.kind == ActorKind::player && !actor_is_dead(actor)')) `
     'Unified dead-player exclusion for radius, threat and radar counts is missing'
+Assert-True ($runtimeSource.Contains('float intercept_time(') -and
+    $runtimeSource.Contains('settings.aim_intercept_solver') -and
+    $runtimeSource.Contains('settings.aim_angle_boost * normalized_error')) `
+    'Moving-target intercept or angle-adaptive aim response is missing'
+Assert-True ($overlaySource.Contains('player_recently_rendered(') -and
+    $overlaySource.Contains('settings.player_occluded_color') -and
+    $overlaySource.Contains('preview_occluded_')) `
+    'Visible/occluded player ESP separation or preview state is missing'
 Assert-True ($runtimeSource.Contains('dino_activated') -and $runtimeSource.Contains('dino_aim_toggle_active_')) `
     'Independent dino aim activation state is missing'
 Assert-True ($runtimeSource.Contains('snapshot_.world_address != active_world_') -and $runtimeSource.Contains('abandon_chams')) 'Reconnect-safe chams world guard is missing'

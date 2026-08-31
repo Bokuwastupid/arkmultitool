@@ -149,6 +149,44 @@ namespace
         return angle;
     }
 
+    float intercept_time(const Vec3& relative, const Vec3& velocity, const float projectile_speed)
+    {
+        const float distance_squared = relative.x * relative.x + relative.y * relative.y + relative.z * relative.z;
+        if (!std::isfinite(distance_squared) || distance_squared <= 0.0F ||
+            !std::isfinite(projectile_speed) || projectile_speed <= 1.0F)
+        {
+            return 0.0F;
+        }
+
+        const float fallback = std::sqrt(distance_squared) / projectile_speed;
+        const float velocity_squared = velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z;
+        const float a = velocity_squared - projectile_speed * projectile_speed;
+        const float b = 2.0F * (relative.x * velocity.x + relative.y * velocity.y + relative.z * velocity.z);
+        const float c = distance_squared;
+        constexpr float epsilon = 0.001F;
+
+        if (std::abs(a) <= epsilon)
+        {
+            if (std::abs(b) > epsilon)
+            {
+                const float linear_time = -c / b;
+                if (std::isfinite(linear_time) && linear_time > 0.0F) return linear_time;
+            }
+            return fallback;
+        }
+
+        const float discriminant = b * b - 4.0F * a * c;
+        if (!std::isfinite(discriminant) || discriminant < 0.0F) return fallback;
+        const float root = std::sqrt(discriminant);
+        const float denominator = 2.0F * a;
+        const float first = (-b - root) / denominator;
+        const float second = (-b + root) / denominator;
+        float result = std::numeric_limits<float>::max();
+        if (std::isfinite(first) && first > 0.0F) result = first;
+        if (std::isfinite(second) && second > 0.0F) result = std::min(result, second);
+        return result == std::numeric_limits<float>::max() ? fallback : result;
+    }
+
     std::wstring lower(std::wstring value)
     {
         std::transform(value.begin(), value.end(), value.begin(),
@@ -1690,7 +1728,12 @@ namespace kopt
             if (settings.aim_prediction)
             {
                 const float projectile_speed = settings.projectile_velocity_mps * 100.0F;
-                const float travel_seconds = std::clamp(distance(point, snapshot_.camera.location) / projectile_speed +
+                const Vec3 relative{point.x - snapshot_.camera.location.x,
+                    point.y - snapshot_.camera.location.y, point.z - snapshot_.camera.location.z};
+                float flight_seconds = distance(point, snapshot_.camera.location) / projectile_speed;
+                if (settings.aim_intercept_solver)
+                    flight_seconds = intercept_time(relative, actor.velocity, projectile_speed);
+                const float travel_seconds = std::clamp(flight_seconds +
                     settings.prediction_latency_ms * 0.001F, 0.0F, 3.0F);
                 point.x += actor.velocity.x * travel_seconds;
                 point.y += actor.velocity.y * travel_seconds;
@@ -1845,11 +1888,19 @@ namespace kopt
         const float desired_yaw = std::atan2(delta.y, delta.x) * radians_to_degrees;
         const float desired_pitch = std::atan2(delta.z, flat) * radians_to_degrees;
         const float smoothing = snapshot_.local_mounted ? settings.mounted_aim_smoothing : settings.aim_smoothing;
-        const float response = smoothing <= 1.0F ? 1.0F :
+        const float base_response = smoothing <= 1.0F ? 1.0F :
             1.0F - std::exp(std::log1p(-1.0F / smoothing) *
                 (std::clamp(delta_seconds, 0.001F, 0.10F) * 60.0F));
-        rotation.x += normalize_angle(desired_pitch - rotation.x) * response;
-        rotation.y += normalize_angle(desired_yaw - rotation.y) * response;
+        const float pitch_error = normalize_angle(desired_pitch - rotation.x);
+        const float yaw_error = normalize_angle(desired_yaw - rotation.y);
+        const float angular_error = std::sqrt(pitch_error * pitch_error + yaw_error * yaw_error);
+        const float active_fov = snapshot_.local_mounted ? settings.mounted_aim_fov : settings.aim_fov;
+        const float normalized_error = std::clamp(angular_error / std::max(1.0F, active_fov), 0.0F, 1.0F);
+        const float response_scale = 1.0F + settings.aim_angle_boost * normalized_error;
+        const float response = base_response >= 1.0F ? 1.0F :
+            1.0F - std::pow(1.0F - base_response, response_scale);
+        rotation.x += pitch_error * response;
+        rotation.y += yaw_error * response;
         rotation.z = 0.0F;
         // PDB profile: AShooterPlayerController::SetControlRotation at RVA 0x1087E60.
         // Use the game's override on the game thread instead of a raw memory write. Besides

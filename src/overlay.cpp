@@ -86,6 +86,7 @@ namespace
             {L"aim.lock", L"Lock selected target", L"Aim", &S::aim_lock},
             {L"aim.fov_circle", L"Draw aim FOV", L"Aim", &S::aim_draw_fov},
             {L"aim.prediction", L"Projectile prediction", L"Aim", &S::aim_prediction},
+            {L"aim.intercept", L"Moving-target intercept solver", L"Aim", &S::aim_intercept_solver},
             {L"esp.master", L"Master ESP", L"ESP", &S::esp_enabled},
             {L"esp.players", L"Players", L"ESP", &S::player_esp},
             {L"esp.dinos_tamed", L"Enemy / tamed dinosaurs", L"ESP", &S::enemy_dino_esp},
@@ -127,6 +128,8 @@ namespace
             {L"esp.summary_filters", L"Summaries use ESP filters", L"ESP summaries", &S::summary_uses_filters},
             {L"esp.player_labels", L"Player labels", L"ESP player", &S::show_player_labels},
             {L"esp.player_status", L"Player status badge", L"ESP player", &S::show_player_status},
+            {L"esp.player_occlusion_color", L"Separate occluded player color", L"ESP player",
+                &S::player_occluded_color_enabled},
             {L"esp.player_health", L"Player health", L"ESP player", &S::show_player_health},
             {L"esp.player_torpor", L"Player torpor", L"ESP player", &S::show_player_torpor},
             {L"esp.dino_labels", L"Dino labels", L"ESP world", &S::show_dino_labels},
@@ -320,6 +323,14 @@ namespace
         if (torpor_ratio >= 0.95F) return PlayerEspState::knocked_out;
         if (actor.sleeping) return PlayerEspState::sleeping;
         return PlayerEspState::awake;
+    }
+
+    bool player_recently_rendered(const kopt::Snapshot& snapshot, const kopt::Actor& actor,
+        const float grace_ms)
+    {
+        if (snapshot.world_time <= 0.0 || actor.last_render_time <= 0.0) return false;
+        const double age = snapshot.world_time - actor.last_render_time;
+        return std::isfinite(age) && age >= 0.0 && age <= static_cast<double>(grace_ms) * 0.001;
     }
 
     bool player_state_enabled(const kopt::Settings& settings, const PlayerEspState state)
@@ -928,6 +939,11 @@ namespace kopt
             const Color status_color = actor.kind == ActorKind::player ?
                 player_state_color(settings, player_state) : color;
             if (actor.kind == ActorKind::player && settings.player_color_source == 1) color = status_color;
+            const bool player_occluded = actor.kind == ActorKind::player &&
+                player_state != PlayerEspState::dead &&
+                !player_recently_rendered(snapshot, actor, settings.player_visibility_grace_ms);
+            if (player_occluded && settings.player_occluded_color_enabled)
+                color = settings.player_occluded_color;
             if (actor.kind == ActorKind::dino && actor.team < 50000) color = settings.wild_color;
             if (actor.kind == ActorKind::structure) color = settings.structure_color;
             color.a *= settings.esp_opacity;
@@ -1695,19 +1711,21 @@ namespace kopt
                 slider(L"Aim FOV", settings.aim_fov, 1.0F, 45.0F, content_left, y, input, L" deg");
                 slider(L"Maximum distance", settings.aim_distance_m, 25.0F, 1500.0F, content_left, y, input, L" m");
                 slider(L"Smoothing", settings.aim_smoothing, 1.0F, 25.0F, content_left, y, input);
+                slider(L"Angle catch-up", settings.aim_angle_boost, 0.0F, 4.0F, content_left, y, input);
                 slider(L"Mounted FOV", settings.mounted_aim_fov, 1.0F, 45.0F, content_left, y, input, L" deg");
                 slider(L"Mounted smoothing", settings.mounted_aim_smoothing, 1.0F, 25.0F, content_left, y, input);
             }
             else
             {
                 checkbox(L"Projectile prediction", settings.aim_prediction, content_left, y, input);
+                checkbox(L"Moving-target intercept solver", settings.aim_intercept_solver, content_left, y, input);
                 slider(L"Projectile velocity", settings.projectile_velocity_mps, 10.0F, 2500.0F,
                     content_left, y, input, L" m/s");
                 slider(L"Gravity", settings.projectile_gravity_mps2, 0.0F, 50.0F,
                     content_left, y, input, L" m/s2");
                 slider(L"Network latency", settings.prediction_latency_ms, 0.0F, 500.0F,
                     content_left, y, input, L" ms");
-                text(L"Prediction uses smoothed actor velocity and keeps normal smoothing unchanged.",
+                text(L"Intercept solves lateral/diagonal travel time; Angle catch-up accelerates large FOV errors without changing near-target smoothing.",
                     {content_left, y + 8.0F, frame.right - 32.0F, y + 50.0F}, text_secondary, 12.0F);
             }
         }
@@ -1834,6 +1852,13 @@ namespace kopt
                 checkbox(L"Player status badge", settings.show_player_status, content_left, y, input);
                 checkbox(L"Player health", settings.show_player_health, content_left, y, input);
                 checkbox(L"Player torpor", settings.show_player_torpor, content_left, y, input);
+                checkbox(L"Separate occluded player color", settings.player_occluded_color_enabled,
+                    content_left, y, input);
+                slider(L"Visibility grace", settings.player_visibility_grace_ms, 50.0F, 500.0F,
+                    content_left, y, input, L" ms");
+                text(L"Visible players keep Relation/Status colors; geometry-occluded players use the dedicated color.",
+                    {content_left + 2.0F, y + 2.0F, frame.right - 32.0F, y + 42.0F}, text_secondary, 11.0F);
+                y += 44.0F;
                 slider(L"Box thickness", settings.esp_box_thickness, 0.5F, 4.0F, content_left, y, input, L" px");
                 slider(L"Skeleton thickness", settings.esp_skeleton_thickness, 0.5F, 3.0F, content_left, y, input, L" px");
             }
@@ -2130,8 +2155,8 @@ namespace kopt
             {
                 static constexpr const wchar_t* color_targets[]{
                     L"Menu accent", L"Own tribe", L"Allies", L"Enemies", L"Player awake",
-                    L"Player sleeping", L"Player knocked out", L"Player dead", L"Wild dinos",
-                    L"Structures", L"Health", L"Torpor", L"Local chams"};
+                    L"Player sleeping", L"Player knocked out", L"Player dead", L"Player occluded",
+                    L"Wild dinos", L"Structures", L"Health", L"Torpor", L"Local chams"};
                 combo(L"Color target", color_target_, color_targets, std::size(color_targets), 19,
                     content_left, y, input);
                 Color* selected = color_target_ == 0 ? &settings.menu_accent_color :
@@ -2142,10 +2167,11 @@ namespace kopt
                     color_target_ == 5 ? &settings.player_sleeping_color :
                     color_target_ == 6 ? &settings.player_knocked_out_color :
                     color_target_ == 7 ? &settings.player_dead_color :
-                    color_target_ == 8 ? &settings.wild_color :
-                    color_target_ == 9 ? &settings.structure_color :
-                    color_target_ == 10 ? &settings.health_color :
-                    color_target_ == 11 ? &settings.torpor_color : &settings.local_chams_color;
+                    color_target_ == 8 ? &settings.player_occluded_color :
+                    color_target_ == 9 ? &settings.wild_color :
+                    color_target_ == 10 ? &settings.structure_color :
+                    color_target_ == 11 ? &settings.health_color :
+                    color_target_ == 12 ? &settings.torpor_color : &settings.local_chams_color;
                 fill({content_left + 2.0F, y, content_left + 500.0F, y + 34.0F},
                     {selected->r, selected->g, selected->b, 1.0F});
                 stroke({content_left + 2.0F, y, content_left + 500.0F, y + 34.0F}, text_secondary);
@@ -2540,6 +2566,11 @@ namespace kopt
             accent, 12.0F, TextAlign::center);
         text(L"Drag NAME, STATUS, HP or TORPOR to a highlighted anchor", {x + 14.0F, y + 28.0F, x + 496.0F, y + 49.0F},
             text_secondary, 11.0F, TextAlign::center);
+        if (button(preview_occluded_ ? L"OCCLUDED" : L"VISIBLE",
+            {x + 394.0F, y + 51.0F, x + 496.0F, y + 74.0F}, preview_occluded_, input))
+        {
+            preview_occluded_ = !preview_occluded_;
+        }
 
         const Rect model{x + 203.0F, y + 78.0F, x + 307.0F, y + 340.0F};
         const Rect zones[]{
@@ -2558,8 +2589,10 @@ namespace kopt
                 Color{0.12F, 0.17F, 0.24F, 0.8F});
         }
 
-        const Color preview_base = settings.player_color_source == 1 ?
+        const Color normal_preview_base = settings.player_color_source == 1 ?
             settings.player_awake_color : settings.enemy_color;
+        const Color preview_base = preview_occluded_ && settings.player_occluded_color_enabled ?
+            settings.player_occluded_color : normal_preview_base;
         const Color preview_color{preview_base.r, preview_base.g, preview_base.b, settings.esp_opacity};
         if (settings.esp_box_style == 0)
         {

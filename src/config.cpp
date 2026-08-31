@@ -8,7 +8,7 @@
 
 namespace
 {
-    constexpr std::uint32_t settings_schema_version = 19U;
+    constexpr std::uint32_t settings_schema_version = 20U;
 
     bool read_bool(const std::filesystem::path& path, const wchar_t* section,
         const wchar_t* key, const bool fallback)
@@ -110,6 +110,7 @@ namespace kopt
         aim_fov = std::clamp(aim_fov, 1.0F, 90.0F);
         aim_distance_m = std::clamp(aim_distance_m, 10.0F, 2500.0F);
         aim_smoothing = std::clamp(aim_smoothing, 1.0F, 40.0F);
+        aim_angle_boost = std::clamp(aim_angle_boost, 0.0F, 4.0F);
         aim_activation_mode = std::clamp(aim_activation_mode, 0, 2);
         dino_aim_activation_mode = std::clamp(dino_aim_activation_mode, 0, 2);
         hotkey_list_x = std::clamp(hotkey_list_x, 0.05F, 0.95F);
@@ -164,6 +165,7 @@ namespace kopt
         esp_skeleton_thickness = std::clamp(esp_skeleton_thickness, 0.5F, 3.0F);
         esp_label_size = std::clamp(esp_label_size, 10.0F, 22.0F);
         esp_icon_size = std::clamp(esp_icon_size, 18.0F, 48.0F);
+        player_visibility_grace_ms = std::clamp(player_visibility_grace_ms, 50.0F, 500.0F);
         radar_size = std::clamp(radar_size, 120.0F, 360.0F);
         radar_range_m = std::clamp(radar_range_m, 50.0F, 1500.0F);
         threat_distance_m = std::clamp(threat_distance_m, 25.0F, 2000.0F);
@@ -191,6 +193,7 @@ namespace kopt
         normalize_color(player_sleeping_color);
         normalize_color(player_knocked_out_color);
         normalize_color(player_dead_color);
+        normalize_color(player_occluded_color);
         normalize_color(wild_color);
         normalize_color(structure_color);
         normalize_color(health_color);
@@ -235,9 +238,11 @@ namespace kopt
         aim_fov = read_float(path, L"Aim", L"Fov", aim_fov);
         aim_distance_m = read_float(path, L"Aim", L"DistanceM", aim_distance_m);
         aim_smoothing = read_float(path, L"Aim", L"Smoothing", aim_smoothing);
+        aim_angle_boost = read_float(path, L"Aim", L"AngleBoost", aim_angle_boost);
         mounted_aim_fov = read_float(path, L"Aim", L"MountedFov", mounted_aim_fov);
         mounted_aim_smoothing = read_float(path, L"Aim", L"MountedSmoothing", mounted_aim_smoothing);
         aim_prediction = read_bool(path, L"Aim", L"Prediction", aim_prediction);
+        aim_intercept_solver = read_bool(path, L"Aim", L"InterceptSolver", aim_intercept_solver);
         projectile_velocity_mps = read_float(path, L"Aim", L"ProjectileVelocityMps", projectile_velocity_mps);
         projectile_gravity_mps2 = read_float(path, L"Aim", L"ProjectileGravityMps2", projectile_gravity_mps2);
         prediction_latency_ms = read_float(path, L"Aim", L"PredictionLatencyMs", prediction_latency_ms);
@@ -294,6 +299,8 @@ namespace kopt
         show_knocked_out_players = read_bool(path, L"ESP", L"KnockedOutPlayers", show_knocked_out_players);
         show_dead_players = read_bool(path, L"ESP", L"DeadPlayers", show_dead_players);
         show_player_status = read_bool(path, L"ESP", L"PlayerStatus", show_player_status);
+        player_occluded_color_enabled = read_bool(path, L"ESP", L"PlayerOccludedColorEnabled",
+            player_occluded_color_enabled);
         show_player_labels = read_bool(path, L"ESP", L"PlayerLabels", show_player_labels);
         show_dino_labels = read_bool(path, L"ESP", L"DinoLabels", show_dino_labels);
         show_structure_labels = read_bool(path, L"ESP", L"StructureLabels", show_structure_labels);
@@ -334,6 +341,8 @@ namespace kopt
         esp_skeleton_thickness = read_float(path, L"ESP", L"SkeletonThickness", esp_skeleton_thickness);
         esp_label_size = read_float(path, L"ESP", L"LabelSize", esp_label_size);
         esp_icon_size = read_float(path, L"ESP", L"IconSize", esp_icon_size);
+        player_visibility_grace_ms = read_float(path, L"ESP", L"PlayerVisibilityGraceMs",
+            player_visibility_grace_ms);
         radar_size = read_float(path, L"ESP", L"RadarSize", radar_size);
         radar_range_m = read_float(path, L"ESP", L"RadarRangeM", radar_range_m);
         threat_distance_m = read_float(path, L"ESP", L"ThreatDistanceM", threat_distance_m);
@@ -392,6 +401,7 @@ namespace kopt
         player_sleeping_color = read_color(path, L"PlayerSleeping", player_sleeping_color);
         player_knocked_out_color = read_color(path, L"PlayerKnockedOut", player_knocked_out_color);
         player_dead_color = read_color(path, L"PlayerDead", player_dead_color);
+        player_occluded_color = read_color(path, L"PlayerOccluded", player_occluded_color);
         wild_color = read_color(path, L"Wild", wild_color);
         structure_color = read_color(path, L"Structure", structure_color);
         health_color = read_color(path, L"Health", health_color);
@@ -487,9 +497,11 @@ namespace kopt
         write_float(path, L"Aim", L"Fov", aim_fov);
         write_float(path, L"Aim", L"DistanceM", aim_distance_m);
         write_float(path, L"Aim", L"Smoothing", aim_smoothing);
+        write_float(path, L"Aim", L"AngleBoost", aim_angle_boost);
         write_float(path, L"Aim", L"MountedFov", mounted_aim_fov);
         write_float(path, L"Aim", L"MountedSmoothing", mounted_aim_smoothing);
         write_bool(path, L"Aim", L"Prediction", aim_prediction);
+        write_bool(path, L"Aim", L"InterceptSolver", aim_intercept_solver);
         write_float(path, L"Aim", L"ProjectileVelocityMps", projectile_velocity_mps);
         write_float(path, L"Aim", L"ProjectileGravityMps2", projectile_gravity_mps2);
         write_float(path, L"Aim", L"PredictionLatencyMs", prediction_latency_ms);
@@ -545,6 +557,7 @@ namespace kopt
         write_bool(path, L"ESP", L"KnockedOutPlayers", show_knocked_out_players);
         write_bool(path, L"ESP", L"DeadPlayers", show_dead_players);
         write_bool(path, L"ESP", L"PlayerStatus", show_player_status);
+        write_bool(path, L"ESP", L"PlayerOccludedColorEnabled", player_occluded_color_enabled);
         write_bool(path, L"ESP", L"PlayerLabels", show_player_labels);
         write_bool(path, L"ESP", L"DinoLabels", show_dino_labels);
         write_bool(path, L"ESP", L"StructureLabels", show_structure_labels);
@@ -584,6 +597,7 @@ namespace kopt
         write_float(path, L"ESP", L"SkeletonThickness", esp_skeleton_thickness);
         write_float(path, L"ESP", L"LabelSize", esp_label_size);
         write_float(path, L"ESP", L"IconSize", esp_icon_size);
+        write_float(path, L"ESP", L"PlayerVisibilityGraceMs", player_visibility_grace_ms);
         write_float(path, L"ESP", L"RadarSize", radar_size);
         write_float(path, L"ESP", L"RadarRangeM", radar_range_m);
         write_float(path, L"ESP", L"ThreatDistanceM", threat_distance_m);
@@ -642,6 +656,7 @@ namespace kopt
         write_color(path, L"PlayerSleeping", player_sleeping_color);
         write_color(path, L"PlayerKnockedOut", player_knocked_out_color);
         write_color(path, L"PlayerDead", player_dead_color);
+        write_color(path, L"PlayerOccluded", player_occluded_color);
         write_color(path, L"Wild", wild_color);
         write_color(path, L"Structure", structure_color);
         write_color(path, L"Health", health_color);
