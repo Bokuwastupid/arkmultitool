@@ -2,6 +2,7 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 #include <bcrypt.h>
+#include <shellapi.h>
 
 #include <array>
 #include <chrono>
@@ -34,6 +35,8 @@ namespace
         bool wait{};
         bool self_test{};
         bool unload{};
+        bool quick{};
+        bool elevation_attempted{};
         int timeout_seconds{180};
     };
 
@@ -58,16 +61,17 @@ namespace
     {
         Options options;
         const auto directory = executable_directory();
+        const auto payload = directory / L"kopt_payload.dll";
         const auto candidate = directory / L"kopt_payload_candidate.dll";
-        // The loader bundle deliberately ships the validated candidate name. Make the
-        // command-line backend useful when launched directly as well, while retaining the
-        // legacy payload name for developer build directories.
-        options.dll = std::filesystem::exists(candidate) ? candidate : directory / L"kopt_payload.dll";
+        options.dll = std::filesystem::exists(payload) ? payload : candidate;
+        options.quick = argc == 1;
         for (int i = 1; i < argc; ++i)
         {
             const std::wstring argument = argv[i];
             if (argument == L"--help" || argument == L"-h") { usage(); return std::nullopt; }
             if (argument == L"--wait") options.wait = true;
+            else if (argument == L"--quick") options.quick = true;
+            else if (argument == L"--elevated") options.elevation_attempted = true;
             else if (argument == L"--self-test") options.self_test = true;
             else if (argument == L"--unload") options.unload = true;
             else if ((argument == L"--process" || argument == L"--dll" || argument == L"--pid" || argument == L"--timeout") && i + 1 < argc)
@@ -84,7 +88,37 @@ namespace
                 return std::nullopt;
             }
         }
+        if (options.quick)
+        {
+            options.wait = true;
+            options.timeout_seconds = 600;
+        }
         return options;
+    }
+
+    void quick_message(const std::wstring& message, const UINT icon = MB_ICONINFORMATION)
+    {
+        MessageBoxW(nullptr, message.c_str(), L"KOPT Quick Injector", MB_OK | icon | MB_SETFOREGROUND);
+    }
+
+    bool relaunch_elevated()
+    {
+        std::wstring executable(32768, L'\0');
+        const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+        if (length == 0) return false;
+        executable.resize(length);
+        const std::wstring directory = executable_directory().wstring();
+        SHELLEXECUTEINFOW request{};
+        request.cbSize = sizeof(request);
+        request.fMask = SEE_MASK_NOCLOSEPROCESS;
+        request.lpVerb = L"runas";
+        request.lpFile = executable.c_str();
+        request.lpParameters = L"--quick --elevated";
+        request.lpDirectory = directory.c_str();
+        request.nShow = SW_SHOWNORMAL;
+        if (ShellExecuteExW(&request) == FALSE) return false;
+        if (request.hProcess != nullptr) CloseHandle(request.hProcess);
+        return true;
     }
 
     DWORD find_process(const std::wstring& name)
@@ -431,7 +465,7 @@ namespace
     }
 }
 
-int wmain(const int argc, wchar_t** argv)
+int run_injector(const int argc, wchar_t** argv)
 {
     const auto parsed = parse(argc, argv);
     if (!parsed) return argc > 1 ? 2 : 0;
@@ -440,6 +474,7 @@ int wmain(const int argc, wchar_t** argv)
     std::wstring error;
     if (!options.unload && !validate_payload(options.dll, error))
     {
+        if (options.quick) quick_message(error + L"\n\nKeep KOPT_Inject.exe and kopt_payload.dll in the same folder.", MB_ICONERROR);
         std::wcerr << L"[KOPT] " << error << L"\n";
         return 3;
     }
@@ -461,6 +496,14 @@ int wmain(const int argc, wchar_t** argv)
     {
         pid = find_process(options.process);
         if (pid != 0) break;
+        if (options.quick)
+        {
+            const int action = MessageBoxW(nullptr,
+                L"ShooterGame.exe is not running.\n\nStart ARK, enter the main menu, then click Retry.",
+                L"KOPT Quick Injector", MB_RETRYCANCEL | MB_ICONINFORMATION | MB_SETFOREGROUND);
+            if (action != IDRETRY) return 4;
+            continue;
+        }
         if (!options.wait || std::chrono::steady_clock::now() >= deadline)
         {
             std::wcerr << L"[KOPT] Process not found: " << options.process << L"\n";
@@ -474,17 +517,51 @@ int wmain(const int argc, wchar_t** argv)
     {
         if (!request_unload(pid, error))
         {
+            if (options.quick) quick_message(L"Unload failed:\n" + error, MB_ICONERROR);
             std::wcerr << L"[KOPT] Unload failed: " << error << L"\n";
             return 6;
         }
+        if (options.quick) quick_message(L"Payload unloaded cleanly.");
         std::wcout << L"[KOPT] Payload unloaded cleanly.\n";
         return 0;
     }
     if (!inject(pid, options.dll, error))
     {
+        if (options.quick && error.find(L"already loaded") != std::wstring::npos)
+        {
+            quick_message(L"KOPT is already injected.\n\nHOME opens the menu. END unloads it.");
+            return 0;
+        }
+        if (options.quick && !options.elevation_attempted &&
+            error.find(L"OpenProcess failed (error 5)") != std::wstring::npos)
+        {
+            if (relaunch_elevated()) return 0;
+            quick_message(L"Administrator permission was not granted. Injection was cancelled.", MB_ICONERROR);
+            return 5;
+        }
+        if (options.quick) quick_message(L"Injection failed:\n" + error, MB_ICONERROR);
         std::wcerr << L"[KOPT] Injection failed: " << error << L"\n";
         return 5;
     }
+    if (options.quick)
+        quick_message(L"Injected successfully.\n\nHOME opens the menu. END unloads it.");
     std::wcout << L"[KOPT] Payload loaded. HOME opens the in-game menu; END unloads it.\n";
     return 0;
 }
+
+#if defined(KOPT_QUICK_GUI)
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+{
+    int argc{};
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv == nullptr) return 2;
+    const int result = run_injector(argc, argv);
+    LocalFree(argv);
+    return result;
+}
+#else
+int wmain(const int argc, wchar_t** argv)
+{
+    return run_injector(argc, argv);
+}
+#endif
