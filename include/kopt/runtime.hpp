@@ -276,6 +276,8 @@ namespace kopt
         std::uintptr_t g_world_{};
         std::uintptr_t g_names_{};
         std::uintptr_t active_world_{};
+        std::uintptr_t pending_world_{};
+        std::chrono::steady_clock::time_point pending_world_since_{};
         std::uint64_t world_generation_{};
         Snapshot snapshot_{};
         std::unordered_map<std::uintptr_t, ClassMeta> class_cache_;

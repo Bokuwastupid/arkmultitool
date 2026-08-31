@@ -385,7 +385,6 @@ namespace
             error = L"Target process is not Win64";
             return false;
         }
-        if (!validate_target_build(process.value, error)) return false;
         const auto loaded = loaded_payload(pid);
         if (!loaded)
         {

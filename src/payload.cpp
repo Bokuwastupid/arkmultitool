@@ -94,6 +94,7 @@ namespace
     std::uintptr_t g_game_module_base{};
     alignas(8) std::uint64_t g_none_fname{};
     std::atomic<std::uint32_t> g_skeleton_guard_hits{};
+    std::atomic<std::uint32_t> g_diagnostic_feature_flags{};
     struct PanicState
     {
         bool active{};
@@ -155,12 +156,31 @@ namespace
             nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (context != INVALID_HANDLE_VALUE)
         {
+            const auto feature_flags = g_diagnostic_feature_flags.load(std::memory_order_relaxed);
+            const auto exception_code = exception != nullptr && exception->ExceptionRecord != nullptr ?
+                exception->ExceptionRecord->ExceptionCode : 0UL;
+            const auto exception_address = exception != nullptr && exception->ExceptionRecord != nullptr ?
+                reinterpret_cast<std::uintptr_t>(exception->ExceptionRecord->ExceptionAddress) : 0ULL;
+            const auto exception_operation = exception != nullptr && exception->ExceptionRecord != nullptr &&
+                exception->ExceptionRecord->NumberParameters > 0 ?
+                exception->ExceptionRecord->ExceptionInformation[0] : 0ULL;
+            const auto exception_target = exception != nullptr && exception->ExceptionRecord != nullptr &&
+                exception->ExceptionRecord->NumberParameters > 1 ?
+                exception->ExceptionRecord->ExceptionInformation[1] : 0ULL;
             const std::wstring payload = std::format(
                 L"KOPT diagnostics\r\nKind={}\r\nPID={}\r\nWorldGeneration={}\r\n"
-                L"LocalValid={}\r\nAimActive={}\r\nMenuOpen={}\r\nSkeletonGuardHits={}\r\n",
+                L"LocalValid={}\r\nAimActive={}\r\nMenuOpen={}\r\nSkeletonGuardHits={}\r\n"
+                L"ExceptionCode=0x{:08X}\r\nExceptionAddress=0x{:016X}\r\n"
+                L"ExceptionOperation={}\r\nExceptionTarget=0x{:016X}\r\n"
+                L"Esp={}\r\nPlayerAim={}\r\nDinoAim={}\r\nFreecam={}\r\n"
+                L"LocalChams={}\r\nNoRecoil={}\r\nNoSway={}\r\n",
                 crash ? L"crash" : L"manual", GetCurrentProcessId(), g_logged_world_generation,
                 g_logged_local_valid, g_logged_aim_active, g_menu_open.load(std::memory_order_relaxed),
-                g_skeleton_guard_hits.load(std::memory_order_relaxed));
+                g_skeleton_guard_hits.load(std::memory_order_relaxed), exception_code, exception_address,
+                exception_operation, exception_target, (feature_flags & (1U << 0)) != 0,
+                (feature_flags & (1U << 1)) != 0, (feature_flags & (1U << 2)) != 0,
+                (feature_flags & (1U << 3)) != 0, (feature_flags & (1U << 4)) != 0,
+                (feature_flags & (1U << 5)) != 0, (feature_flags & (1U << 6)) != 0);
             const wchar_t bom = 0xFEFF;
             DWORD written{};
             WriteFile(context, &bom, sizeof(bom), &written, nullptr);
@@ -512,6 +532,15 @@ namespace
         g_freecam_key.store(g_settings.freecam_key, std::memory_order_release);
         g_esp_toggle_key.store(g_settings.esp_toggle_key, std::memory_order_release);
         g_freecam_active.store(g_settings.freecam, std::memory_order_release);
+        const std::uint32_t diagnostic_flags =
+            (g_settings.esp_enabled ? (1U << 0) : 0U) |
+            (g_settings.player_aim ? (1U << 1) : 0U) |
+            (g_settings.dino_aim ? (1U << 2) : 0U) |
+            (g_settings.freecam ? (1U << 3) : 0U) |
+            (g_settings.local_chams ? (1U << 4) : 0U) |
+            (g_settings.no_recoil ? (1U << 5) : 0U) |
+            (g_settings.no_sway ? (1U << 6) : 0U);
+        g_diagnostic_feature_flags.store(diagnostic_flags, std::memory_order_release);
         g_panic_key.store(g_settings.panic_key, std::memory_order_release);
         g_local_chams_draw_mode.store(g_settings.local_chams ? g_settings.local_chams_style : -1,
             std::memory_order_release);

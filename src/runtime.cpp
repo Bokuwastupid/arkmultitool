@@ -424,13 +424,16 @@ namespace kopt
 
     bool ArkRuntime::capture()
     {
-        std::uintptr_t world{};
-        if (!read(g_world_, world) || world < 0x10000)
+        // read_local() selects and validates the active gameplay UWorld once per
+        // Present. Do not sample GWorld again here: ARK temporarily points that
+        // global at auxiliary worlds while rendering/loading, which used to mix
+        // actors from one world with the local state of another.
+        const std::uintptr_t world = active_world_;
+        if (world < 0x10000 || snapshot_.world_address != world)
         {
             status_ = L"Waiting for UWorld";
             return false;
         }
-        read_local();
         std::erase_if(snapshot_.actors, [&](const Actor& actor) {
             return actor.address == snapshot_.local_pawn || actor.address == snapshot_.local_character ||
                 (actor.kind == ActorKind::player && local_player_data_id_ != 0 &&
@@ -687,6 +690,8 @@ namespace kopt
         };
         if (!read(g_world_, world) || world < 0x10000)
         {
+            pending_world_ = 0;
+            pending_world_since_ = {};
             if (active_world_ != 0)
             {
                 active_world_ = 0;
@@ -705,10 +710,40 @@ namespace kopt
             invalidate_local();
             return false;
         }
+        Vec3 local_position{};
+        if (!read(world + offsets_.owning_game_instance, game_instance) ||
+            !read(game_instance + offsets_.local_players, players_data) ||
+            !read(game_instance + offsets_.local_players + 8, players_count) || players_count < 1 || players_count > 16 ||
+            !read(players_data, local_player) || !read(local_player + offsets_.player_controller, controller) ||
+            !read(controller + offsets_.acknowledged_pawn, pawn) || !read(pawn + offsets_.actor_root_component, root) ||
+            !read_vec3(root + offsets_.component_to_world + offsets_.transform_translation, local_position))
+        {
+            // GWorld can briefly reference a preview/loading world which has no
+            // valid local-player chain. Preserve the confirmed gameplay world for
+            // a short grace period, but stop using stale local state if a real
+            // travel persists.
+            if (active_world_ != 0 && world != active_world_)
+            {
+                const auto now = std::chrono::steady_clock::now();
+                if (pending_world_ != world)
+                {
+                    pending_world_ = world;
+                    pending_world_since_ = now;
+                    return snapshot_.local_valid;
+                }
+                if (now - pending_world_since_ < std::chrono::milliseconds(250))
+                    return snapshot_.local_valid;
+            }
+            invalidate_local();
+            return false;
+        }
+        pending_world_ = 0;
+        pending_world_since_ = {};
         if (world != active_world_)
         {
-            // Seamless travel/reconnect destroys render components while the old camera may
-            // still tick. Never call engine methods on the previous world's cached pointers.
+            // Only a UWorld with a complete local-player chain may become active.
+            // This prevents auxiliary worlds from churning generations and cached
+            // UObject pointers during GC/seamless travel.
             active_world_ = world;
             snapshot_.world_address = world;
             snapshot_.world_generation = ++world_generation_;
@@ -724,16 +759,6 @@ namespace kopt
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
             chams_ready_after_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-        }
-        if (!read(world + offsets_.owning_game_instance, game_instance) ||
-            !read(game_instance + offsets_.local_players, players_data) ||
-            !read(game_instance + offsets_.local_players + 8, players_count) || players_count < 1 || players_count > 16 ||
-            !read(players_data, local_player) || !read(local_player + offsets_.player_controller, controller) ||
-            !read(controller + offsets_.acknowledged_pawn, pawn) || !read(pawn + offsets_.actor_root_component, root) ||
-            !read_vec3(root + offsets_.component_to_world + offsets_.transform_translation, snapshot_.local_position))
-        {
-            invalidate_local();
-            return false;
         }
         if (pawn != observed_local_pawn_)
         {
@@ -753,6 +778,7 @@ namespace kopt
             abandon_chams();
         }
         snapshot_.local_valid = true;
+        snapshot_.local_position = local_position;
         snapshot_.local_controller = controller;
         snapshot_.local_pawn = pawn;
         snapshot_.local_character = 0;
