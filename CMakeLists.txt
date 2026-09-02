@@ -93,7 +93,18 @@ target_compile_definitions(kopt_injector PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
 )
-target_link_libraries(kopt_injector PRIVATE advapi32 psapi bcrypt)
+target_link_libraries(kopt_injector PRIVATE advapi32 psapi bcrypt shell32 user32)
+
+add_executable(kopt_quick_injector WIN32 src/injector.cpp)
+target_compile_definitions(kopt_quick_injector PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    KOPT_QUICK_GUI
+)
+target_link_libraries(kopt_quick_injector PRIVATE advapi32 psapi bcrypt shell32 user32)
+set_target_properties(kopt_quick_injector PROPERTIES OUTPUT_NAME "KOPT_Inject")
 
 # Standalone smoke test for kopt::share's DTO builders, ChangeFilter, and
 # ReporterFilter -- none of the three touch game memory or the network, so

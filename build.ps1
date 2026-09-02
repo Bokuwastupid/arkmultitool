@@ -27,10 +27,16 @@ $compilePayload = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\paylo
 $compileRuntime = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\runtime.cpp') + '" /Fo"' + (Join-Path $objects 'runtime.obj') + '"'
 $payloadOutput = Join-Path $dist $PayloadName
 $linkPayload = 'link /nologo /dll /out:"' + $payloadOutput + '" /implib:"' + (Join-Path $build 'kopt_payload.lib') + '" "' + (Join-Path $objects 'config.obj') + '" "' + (Join-Path $objects 'overlay.obj') + '" "' + (Join-Path $objects 'payload.obj') + '" "' + (Join-Path $objects 'runtime.obj') + '" d3d11.lib d3dcompiler.lib dxgi.lib gdi32.lib user32.lib winmm.lib ole32.lib dbghelp.lib'
-$buildInjector = 'cl ' + $common + ' "' + (Join-Path $projectRoot 'src\injector.cpp') + '" /Fe:"' + (Join-Path $dist 'kopt_injector.exe') + '" /Fo"' + (Join-Path $objects 'injector.obj') + '" /link /pdb:"' + (Join-Path $build 'kopt_injector.pdb') + '" advapi32.lib psapi.lib bcrypt.lib'
-$nativeCommand = '"' + $devCmd + '" -no_logo -arch=x64 -host_arch=x64 && ' + $compileConfig + ' && ' + $compileOverlay + ' && ' + $compilePayload + ' && ' + $compileRuntime + ' && ' + $linkPayload + ' && ' + $buildInjector
+$buildInjector = 'cl ' + $common + ' "' + (Join-Path $projectRoot 'src\injector.cpp') + '" /Fe:"' + (Join-Path $dist 'kopt_injector.exe') + '" /Fo"' + (Join-Path $objects 'injector.obj') + '" /link /pdb:"' + (Join-Path $build 'kopt_injector.pdb') + '" advapi32.lib psapi.lib bcrypt.lib shell32.lib user32.lib'
+$buildQuickInjector = 'cl ' + $common + ' /DKOPT_QUICK_GUI "' + (Join-Path $projectRoot 'src\injector.cpp') + '" /Fe:"' + (Join-Path $dist 'KOPT_Inject.exe') + '" /Fo"' + (Join-Path $objects 'quick_injector.obj') + '" /link /subsystem:windows /pdb:"' + (Join-Path $build 'KOPT_Inject.pdb') + '" advapi32.lib psapi.lib bcrypt.lib shell32.lib user32.lib'
+$nativeCommand = '"' + $devCmd + '" -no_logo -arch=x64 -host_arch=x64 && ' + $compileConfig + ' && ' + $compileOverlay + ' && ' + $compilePayload + ' && ' + $compileRuntime + ' && ' + $linkPayload + ' && ' + $buildInjector + ' && ' + $buildQuickInjector
 & cmd.exe /d /s /c $nativeCommand
 if ($LASTEXITCODE -ne 0) { throw 'Native build failed.' }
 & (Join-Path $build 'dist\kopt_injector.exe') --self-test --dll $payloadOutput
 if ($LASTEXITCODE -ne 0) { throw 'Injector/payload self-test failed.' }
+$quickBundle = Join-Path $dist 'quick-inject'
+New-Item -ItemType Directory -Force -Path $quickBundle | Out-Null
+Copy-Item -LiteralPath (Join-Path $dist 'KOPT_Inject.exe') -Destination (Join-Path $quickBundle 'KOPT_Inject.exe') -Force
+Copy-Item -LiteralPath $payloadOutput -Destination (Join-Path $quickBundle 'kopt_payload.dll') -Force
 Write-Host "Built KOPT Internal in $(Join-Path $build 'dist')"
+Write-Host "Quick injector bundle: $quickBundle"
