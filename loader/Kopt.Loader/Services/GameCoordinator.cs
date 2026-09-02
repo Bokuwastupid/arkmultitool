@@ -72,6 +72,18 @@ public sealed class GameCoordinator
         return string.IsNullOrWhiteSpace(configured) ? Path.Combine(AppContext.BaseDirectory, fileName) : configured;
     }
 
+    // Files Proton stages into the prefix's system32 can come out without a
+    // write bit (confirmed: a real prefix's version.dll was -r-xr-xr-x).
+    // Clearing ReadOnly is a no-op when the file is already writable or
+    // doesn't exist yet, so this is safe to call unconditionally.
+    private static void EnsureWritable(string path)
+    {
+        if (!File.Exists(path)) return;
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReadOnly) != 0)
+            File.SetAttributes(path, attributes & ~FileAttributes.ReadOnly);
+    }
+
     // "Inject" on Linux means installing the version.dll auto-load proxy --
     // there is no live-attach path here: ARK runs inside the Steam Linux
     // Runtime's bwrap sandbox, which an external process on the host cannot
@@ -131,7 +143,14 @@ public sealed class GameCoordinator
                             "files/lib/wine/x86_64-windows/version.dll.");
                     File.Copy(source, targetOrig);
                 }
+                // Files Wine/Proton stage into system32 sometimes come out
+                // read-only (555) -- confirmed against a real prefix: the
+                // real version.dll there had no write bit at all, so
+                // File.Copy(overwrite: true) failed with UnauthorizedAccessException
+                // before ever reaching kopt_payload.dll.
+                EnsureWritable(targetVersion);
                 File.Copy(proxyVersion, targetVersion, overwrite: true);
+                EnsureWritable(targetPayload);
                 File.Copy(proxyPayload, targetPayload, overwrite: true);
                 if (!WinePrefixOverride.HasOverride(userReg))
                     WinePrefixOverride.AddOverride(userReg);
@@ -172,12 +191,14 @@ public sealed class GameCoordinator
         {
             await Task.Run(() =>
             {
-                if (File.Exists(targetPayload)) File.Delete(targetPayload);
+                if (File.Exists(targetPayload)) { EnsureWritable(targetPayload); File.Delete(targetPayload); }
                 if (File.Exists(targetOrig))
                 {
                     // Overwrite-then-delete, not delete-then-move: a crash between
                     // the two steps must never leave version.dll missing outright.
+                    EnsureWritable(targetVersion);
                     File.Copy(targetOrig, targetVersion, overwrite: true);
+                    EnsureWritable(targetOrig);
                     File.Delete(targetOrig);
                 }
                 if (WinePrefixOverride.HasOverride(userReg))

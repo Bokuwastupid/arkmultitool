@@ -112,6 +112,10 @@ else
   exit 4
 fi
 
+# Files Proton stages into system32 can come out without a write bit
+# (confirmed: a real prefix's version.dll was -r-xr-xr-x) -- chmod before
+# overwrite so this doesn't fail with "Permission denied" on a second install.
+chmod -f u+w "$target_version" "$target_payload" 2>/dev/null || true
 cp -f "$dist_dir/version.dll" "$target_version"
 cp -f "$dist_dir/kopt_payload.dll" "$target_payload"
 
