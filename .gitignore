@@ -41,3 +41,7 @@ profiles/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Fetched by scripts/fetch-quic-deps.sh -- reproducible from nixpkgs, not
+# vendored into git (real binary blobs, ~16MB with OpenSSL's libcrypto).
+/third_party/quic-mingw64/

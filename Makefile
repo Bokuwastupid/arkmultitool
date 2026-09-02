@@ -10,6 +10,10 @@
 # --preserve-credentials`, а не напрямую с хоста.
 #
 # Переопределяй под свою систему: make APPID=... STEAM_ROOT=... <target>
+# .env.mk -- локальный, не в git (.gitignore: .env.*); кладёт SHARE_TOKEN,
+# чтобы не вставлять его руками в каждый make inject/watch.
+-include .env.mk
+
 STEAM_ROOT      ?= $(HOME)/.local/share/Steam
 APPID           ?= 346110
 PROTON_DIR      ?= $(STEAM_ROOT)/steamapps/common/Proton - Experimental
@@ -63,8 +67,13 @@ define run_injector
 		"$(WIN_EXE)" --process $(GAME_PROCESS) $(1)
 endef
 
+# SHARE_TOKEN -- необязателен: make inject SHARE_TOKEN=eyJ... прокидывает
+# --share-token инжектору (см. injector.cpp::publish_share_token) -- без
+# аккаунта/логина, ровно "launch parameter", как договорились.
+SHARE_TOKEN ?=
+
 inject:
-	$(call run_injector,--dll "$(WIN_DLL)")
+	$(call run_injector,--dll "$(WIN_DLL)"$(if $(SHARE_TOKEN), --share-token "$(SHARE_TOKEN)"))
 
 unload:
 	$(call run_injector,--unload)

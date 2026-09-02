@@ -6,6 +6,7 @@
 #include "kopt/share.hpp"
 #include "kopt/share_filter.hpp"
 #include "kopt/share_remote.hpp"
+#include "kopt/http3_publisher.hpp"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -38,31 +39,81 @@ namespace
     using DrawIndexedFn = void(__stdcall*)(ID3D11DeviceContext*, UINT, UINT, INT);
     using DrawIndexedInstancedFn = void(__stdcall*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
 
-    // Read once at the point of use, never cached in a global or written to
-    // kopt_internal.ini -- same "in memory only" policy the loader already
-    // applies to its own tokens (see config.hpp's Share section doc
-    // comment, which documented this exact env-var plan before the
-    // implementation caught up to it). Empty means "not configured";
-    // start() below refuses to run with an empty token rather than
-    // connecting unauthenticated.
-    std::wstring read_share_token()
+    // Read once, at worker() startup, from the named shared-memory section
+    // kopt_injector.exe's --share-token publishes (see its
+    // publish_share_token doc comment) -- never written to kopt_internal.ini,
+    // same "in memory only" policy the loader already applies to its own
+    // tokens. NOT an environment variable: GetEnvironmentVariableW reads
+    // THIS process's own environment block, fixed since ShooterGame.exe
+    // itself was launched, long before an injector ever runs -- setting an
+    // env var anywhere in the injector/loader cannot reach an
+    // already-running target process by any means. Empty means "not
+    // configured" (no --share-token was given at inject time); the
+    // tick-loop refuses to start the publisher with an empty token rather
+    // than connecting unauthenticated.
+    //
+    // Must be read close to process start, not lazily on first use: the
+    // injector only holds its side of the mapping open for a few seconds
+    // after LoadLibraryW returns (see its wmain) -- by the time a user
+    // manually flips the Diagnostics-tab sharing checkbox on, that window
+    // has long since closed and the mapping is gone.
+    //
+    // Shared by both g_share_token ("Kopt_ShareToken_<pid>") and the
+    // backend endpoint override ("Kopt_BackendEndpoint_<pid>") -- same
+    // shared-memory read, different mapping name prefix (see
+    // injector.cpp's publish_string_mapping doc comment for why this
+    // exists instead of a real environment variable).
+    std::wstring read_named_string(const wchar_t* name_prefix)
     {
-        wchar_t buffer[4096];
-        const DWORD length = GetEnvironmentVariableW(L"KOPT_SHARE_TOKEN", buffer, static_cast<DWORD>(std::size(buffer)));
-        if (length == 0 || length >= std::size(buffer)) return {};
-        return std::wstring(buffer, length);
+        const std::wstring name = name_prefix + std::to_wstring(GetCurrentProcessId());
+        const HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name.c_str());
+        if (mapping == nullptr) return {}; // not published -- the injector wasn't given this value at inject time
+        const wchar_t* view = static_cast<const wchar_t*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0));
+        if (view == nullptr)
+        {
+            CloseHandle(mapping);
+            return {};
+        }
+        // The mapping is exactly (value.size() + 1) wchar_t's, written as
+        // one contiguous null-terminated buffer -- see
+        // publish_string_mapping in injector.cpp. wcsnlen bounds the scan
+        // to avoid depending on MapViewOfFile's own view size query (a
+        // second syscall); a hard cap here is simpler and both a
+        // legitimate JWT and a host:port endpoint are always far under it.
+        constexpr std::size_t max_length = 8192;
+        const std::size_t length = wcsnlen(view, max_length);
+        std::wstring value(view, length);
+        UnmapViewOfFile(view);
+        CloseHandle(mapping);
+        return value;
     }
+
+    std::wstring read_share_token() { return read_named_string(L"Kopt_ShareToken_"); }
+    std::wstring read_backend_endpoint() { return read_named_string(L"Kopt_BackendEndpoint_"); }
 
     HMODULE g_module{};
     kopt::Settings g_settings;
     kopt::ArkRuntime g_runtime;
-    // Publisher вместо конкретного RelayClient -- NoopPublisher, пока
-    // Http3Publisher (QUIC/HTTP-3) не собран; переключение на реальный
-    // транспорт -- замена этой единственной строки, ничего в тик-цикле не
-    // меняется (см. план DTO-слоя, шаг 7).
-    std::unique_ptr<kopt::Publisher> g_publisher = std::make_unique<kopt::NoopPublisher>();
+    std::unique_ptr<kopt::Publisher> g_publisher = std::make_unique<kopt::Http3Publisher>();
     std::chrono::steady_clock::time_point g_last_share_submit{};
-    bool g_share_was_enabled{};
+    // Whether g_publisher->start() has actually been called (not just
+    // whether the user wants share on) -- lets the start attempt keep
+    // quietly retrying, tick after tick, while share_enabled is true but
+    // GroupId/server_ip aren't resolved yet (loading screen/main menu),
+    // without re-triggering on every single frame once it succeeds.
+    bool g_share_started{};
+    bool g_share_missing_token_logged{};
+    bool g_share_missing_server_ip_logged{};
+    // Populated once at worker() startup via read_share_token() -- see its
+    // doc comment for why this can't be read lazily on first use.
+    std::wstring g_share_token;
+    // Populated once at worker() startup via read_backend_endpoint().
+    // Empty means "no --backend override was given"; the tick-loop falls
+    // back to kopt_internal.ini's Share.Endpoint in that case (see
+    // g_settings.share_endpoint's default in config.hpp). Kept out of
+    // g_settings so g_settings.save() on unload never persists a
+    // per-launch override into the ini.
+    std::wstring g_backend_endpoint;
     // Память о СВОИХ последних отправленных состояниях (не спамить
     // неизменным) -- один экземпляр на весь процесс, пересоздание каждый
     // тик обнулило бы память и превратило фильтр в no-op.
@@ -1077,32 +1128,98 @@ namespace
                 // меняет g_settings.share_enabled в любой момент, а не
                 // только на загрузке payload'а -- без этой проверки
                 // включение шера в рантайме молчало бы до перезапуска.
-                if (g_settings.share_enabled != g_share_was_enabled)
+                if (g_settings.share_enabled && !g_share_started)
                 {
-                    g_share_was_enabled = g_settings.share_enabled;
-                    if (g_settings.share_enabled)
+                    // Diagnostics-таб держит API-ключ только в памяти
+                    // оверлея (Overlay::share_api_key_, не Settings -- см.
+                    // его doc comment в overlay.hpp), и годится ровно на то
+                    // место, куда иначе шёл бы g_share_token: тот же Bearer
+                    // проверяется на месте JWT бэкендом (core/account_auth.py
+                    // ::get_current_account). g_share_token берёт верх, если
+                    // оно есть (--share-token был передан при инжекте) --
+                    // ключ из меню существует именно на случай, когда его
+                    // не передали.
+                    const std::wstring& effective_token = !g_share_token.empty() ?
+                        g_share_token : g_overlay.share_api_key();
+                    // Same override precedence as the token above: a
+                    // --backend passed at inject time (see
+                    // publish_backend_endpoint's doc comment in
+                    // injector.cpp) beats kopt_internal.ini's Share.Endpoint
+                    // -- moving the relay to a VPS is then a launch
+                    // argument, not an ini edit or a rebuild.
+                    const std::wstring& effective_endpoint = !g_backend_endpoint.empty() ?
+                        g_backend_endpoint : g_settings.share_endpoint;
+                    if (effective_token.empty())
                     {
-                        const std::wstring token = read_share_token();
-                        if (token.empty())
+                        // g_share_token is fixed for the lifetime of this
+                        // process (read once at worker() startup) and the
+                        // menu's API key can still change on a later frame --
+                        // log once per empty spell, not once ever, so typing
+                        // a key in after this fires is still noticed.
+                        if (!g_share_missing_token_logged)
                         {
-                            // g_share_was_enabled is already set to true above --
-                            // deliberately NOT reset to false here: an env var is
-                            // fixed for the lifetime of this process, retrying
-                            // every tick could never succeed and would just log
-                            // (synchronous file I/O) on every single frame.
-                            log_line(L"Share enabled in settings but KOPT_SHARE_TOKEN is not set; not starting publisher");
+                            g_share_missing_token_logged = true;
+                            log_line(L"Share enabled in settings but no --share-token was given at inject time "
+                                L"and no API key is set on the Diagnostics tab; not starting publisher");
                         }
-                        else
+                    }
+                    // Gated on local_valid, not just "is some server_ip
+                    // available": g_settings.share_server_ip (the manual
+                    // ini fallback) is non-empty from the moment the ini
+                    // loads, long before ArkRuntime ever resolves a world --
+                    // checking effective_server_ip.empty() alone would have
+                    // used that stale fallback on the very first tick and
+                    // never given Snapshot::remote_server_ip (see
+                    // ArkRuntime::read_remote_server_ip) a chance to
+                    // populate at all. Waiting for local_valid first means
+                    // the ini value is only ever a genuine fallback -- used
+                    // when the live read actually failed post-spawn, not a
+                    // race winner against it. Confirmed live: without this,
+                    // the publisher started with the ini's placeholder
+                    // 10.99.0.1:7777 instead of the real, freshly-resolved
+                    // server address.
+                    else if (!snapshot.local_valid || g_settings.share_group_id.empty())
+                    {
+                        // Normal transient state during the loading screen/
+                        // main menu -- deliberately silent (no log_line
+                        // here), or this would write to disk every single
+                        // frame until the player spawns in.
+                    }
+                    else if (snapshot.remote_server_ip.empty() && g_settings.share_server_ip.empty())
+                    {
+                        // local_valid is true (world resolved) and the live
+                        // read still came back empty, with no ini fallback
+                        // configured either -- a genuine problem, not a
+                        // transient one, so unlike the branch above this is
+                        // worth a one-shot log.
+                        if (!g_share_missing_server_ip_logged)
                         {
-                            log_line(std::format(L"Starting share publisher: {}", g_settings.share_endpoint));
-                            g_publisher->start(g_settings.share_endpoint, token);
-                            g_publisher->subscribe(on_remote_batch);
+                            g_share_missing_server_ip_logged = true;
+                            log_line(L"Share enabled but the server address could not be read from game memory "
+                                L"and Share.ServerIp is not set in kopt_internal.ini; not starting publisher");
                         }
                     }
                     else
                     {
-                        g_publisher->stop();
+                        // Doesn't yet reconnect the publisher on a
+                        // mid-session server change (Obelisk travel to a
+                        // different server) -- start() only ever fires once
+                        // per share_enabled toggle; a real follow-up gap,
+                        // not silently ignored.
+                        const std::wstring effective_server_ip = !snapshot.remote_server_ip.empty() ?
+                            snapshot.remote_server_ip : g_settings.share_server_ip;
+                        log_line(std::format(L"Starting share publisher: {} (server={})",
+                            effective_endpoint, effective_server_ip));
+                        g_publisher->start(effective_endpoint, effective_token,
+                            g_settings.share_group_id, effective_server_ip);
+                        g_publisher->subscribe(on_remote_batch);
+                        g_share_started = true;
                     }
+                }
+                else if (!g_settings.share_enabled && g_share_started)
+                {
+                    g_publisher->stop();
+                    g_share_started = false;
                 }
                 if (g_settings.share_enabled &&
                     std::chrono::duration<float, std::milli>(now - g_last_share_submit).count() >=
@@ -1112,8 +1229,27 @@ namespace
                     // build_sightings() -- то же самое множество акторов,
                     // что уже наполняет ESP этот кадр: источник правды здесь,
                     // а не отдельный пересчёт "что показать по сети".
-                    const std::vector<kopt::share::Sighting> all_sightings =
+                    std::vector<kopt::share::Sighting> all_sightings =
                         kopt::share::build_sightings(snapshot.actors);
+                    // snapshot.actors never contains the local player itself
+                    // (ArkRuntime excludes it on purpose -- it's "what I see
+                    // around me", and self needs no ESP box); sharing exists
+                    // precisely so teammates see the sender's own position,
+                    // so it goes in separately here rather than in
+                    // build_sightings() itself.
+                    //
+                    // Gated on share_send_self_position independently of
+                    // everything else in this batch -- first instance of
+                    // "send" being its own axis from "scan"/"render" (see
+                    // Settings::share_send_self_position's own comment):
+                    // this flag only ever affects whether self goes out over
+                    // the wire, never local ESP (self was never drawn there
+                    // to begin with).
+                    if (g_settings.share_send_self_position)
+                    {
+                        if (const auto self = kopt::share::build_self_sighting(snapshot))
+                            all_sightings.push_back(*self);
+                    }
                     g_publisher->submit_sightings(
                         g_share_filter.filter(all_sightings, now),
                         g_share_filter.collect_vanished(all_sightings));
@@ -1151,6 +1287,19 @@ namespace
                 }
                 ensure_camera_hook();
                 g_overlay.set_share_connected(g_publisher->connected());
+                {
+                    // Copy under the lock, hand the plain vector to the
+                    // overlay -- it never touches g_remote_view_mutex
+                    // itself, same reasoning as set_share_connected's own
+                    // doc comment (overlay stays ignorant of the network/
+                    // threading side entirely).
+                    std::vector<kopt::share::RemoteBatch> visible_batches;
+                    {
+                        const std::lock_guard<std::mutex> lock(g_remote_view_mutex);
+                        visible_batches = g_remote_view.visible(now);
+                    }
+                    g_overlay.set_remote_sightings(std::move(visible_batches));
+                }
                 g_overlay.render(swap_chain, g_settings, g_runtime, g_input, g_settings_path);
                 if (g_input.diagnostics_bundle_requested.exchange(false, std::memory_order_acq_rel))
                 {
@@ -1370,6 +1519,11 @@ namespace
         // exactly as "builtin" as LoadLibraryW itself.
         g_unload_event = CreateEventW(nullptr, TRUE, FALSE,
             (L"Kopt_Unload_" + std::to_wstring(GetCurrentProcessId())).c_str());
+        // As early as possible -- see read_share_token's doc comment: the
+        // injector only holds its side of this mapping open for a few
+        // seconds after inject, this has to happen well within that window.
+        g_share_token = read_share_token();
+        g_backend_endpoint = read_backend_endpoint();
         // Registered before everything else, including
         // SetUnhandledExceptionFilter below -- see fatal_exception_logger's
         // doc comment for why this exists as a second, earlier tripwire.

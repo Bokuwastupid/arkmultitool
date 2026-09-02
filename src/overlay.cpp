@@ -592,6 +592,7 @@ namespace kopt
         vertices_.clear();
         if (settings.aim_draw_fov) draw_aim_overlay(settings, runtime);
         if (settings.esp_enabled) draw_esp(settings, runtime);
+        if (settings.esp_enabled) draw_remote_sightings(settings, runtime);
         if (settings.alerts_enabled) draw_alerts(settings, runtime);
         if (settings.show_hotkey_list) draw_hotkey_list(settings, runtime);
         if (settings.menu_open)
@@ -774,6 +775,41 @@ namespace kopt
             text(key_name(hotkey.key) + L" · " + modes[static_cast<std::size_t>(mode)],
                 {row.right - 128.0F, row.top, row.right - 10.0F, row.bottom}, accent, 10.0F, TextAlign::right);
             row_top += row_height;
+        }
+    }
+
+    void Overlay::draw_remote_sightings(const Settings& settings, const ArkRuntime& runtime)
+    {
+        if (remote_batches_.empty()) return;
+        const Snapshot& snapshot = runtime.snapshot();
+        if (!snapshot.local_valid) return;
+        // Отдельный, фиксированный цвет для "прислано тиммейтом" -- не
+        // пересекается ни с одним из существующих ESP-цветов (свой/союзник/
+        // враг/нейтрал), потому что это не то же самое измерение: рамка
+        // локального ESP кодирует отношение к цели, здесь же источник
+        // данных -- сам факт "это не я увидел, это тиммейт прислал".
+        static constexpr Color kRemoteColor{0.7F, 0.4F, 1.0F, 1.0F};
+        static constexpr Color kRemoteOutline{0.05F, 0.02F, 0.1F, 0.9F};
+        for (const share::RemoteBatch& batch : remote_batches_)
+        {
+            for (const share::Sighting& s : batch.sightings)
+            {
+                Vec2 screen{};
+                if (!runtime.world_to_screen({s.x, s.y, s.z}, width_, height_, screen)) continue;
+                const Rect marker{screen.x - 4.0F, screen.y - 4.0F, screen.x + 4.0F, screen.y + 4.0F};
+                fill(marker, kRemoteColor);
+                stroke(marker, kRemoteOutline, 1.0F);
+
+                std::wstring label = !s.label.empty() ? s.label : s.class_name;
+                if (label.empty()) label = L"?";
+                if (settings.show_distance)
+                {
+                    const float distance_m = distance3({s.x, s.y, s.z}, snapshot.camera.location) / 100.0F;
+                    label += (settings.compact_labels ? L"  " : L"\n") + fixed(distance_m) + L"m";
+                }
+                const Rect label_rect{screen.x - 100.0F, screen.y + 8.0F, screen.x + 100.0F, screen.y + 40.0F};
+                text(label, label_rect, kRemoteColor, settings.esp_label_size, TextAlign::center);
+            }
         }
     }
 
@@ -2638,6 +2674,11 @@ namespace kopt
             text(share_connected_ ? L"Share: connected" : L"Share: offline",
                 {content_left + 2.0F, y, frame.right - 32.0F, y + 28.0F},
                 share_connected_ ? success : text_secondary, 12.0F);
+            y += 40.0F;
+            text_input(L"API key (sent in place of --share-token if none was injected)",
+                share_api_key_, 40, content_left, y, input, 128);
+            text(L"Kept in memory for this session only -- never written to kopt_internal.ini.",
+                {content_left + 2.0F, y + 4.0F, frame.right - 32.0F, y + 28.0F}, text_secondary, 11.0F);
             y += 40.0F;
             checkbox(L"Record Aim Lab trace (30 Hz / 20 seconds)", settings.aim_lab_recording,
                 content_left, y, input);

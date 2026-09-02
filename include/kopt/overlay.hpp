@@ -3,6 +3,7 @@
 #include "kopt/config.hpp"
 #include "kopt/com_ptr.hpp"
 #include "kopt/runtime.hpp"
+#include "kopt/share_remote.hpp"
 
 #include <windows.h>
 #include <d3d11.h>
@@ -97,9 +98,24 @@ namespace kopt
         // render(), чтобы Diagnostics-вкладка могла показать статус
         // соединения без прямой связи с сетевым слоем.
         void set_share_connected(bool connected) noexcept { share_connected_ = connected; }
+        // Тем же принципом, что set_share_connected: payload.cpp копирует
+        // RemoteView::visible() под своим мьютексом раз в кадр и отдаёт
+        // сюда -- оверлей не знает о g_remote_view/g_remote_view_mutex
+        // (payload.cpp-локальные), только о готовом снимке на отрисовку.
+        void set_remote_sightings(std::vector<share::RemoteBatch> batches) { remote_batches_ = std::move(batches); }
+
+        // Diagnostics-таб держит это поле только в памяти оверлея, не в
+        // Settings -- тот же "in memory only" принцип, что уже применён к
+        // g_share_token (payload.cpp) и к токенам самого лоадера: секрет не
+        // должен пережить процесс на диске в kopt_internal.ini. payload.cpp
+        // читает это раз в кадр перед тем, как решить, каким токеном
+        // стартовать g_publisher (см. его собственный комментарий у места
+        // вызова).
+        [[nodiscard]] const std::wstring& share_api_key() const noexcept { return share_api_key_; }
 
     private:
         bool share_connected_{};
+        std::vector<share::RemoteBatch> remote_batches_;
         struct Rect { float left{}; float top{}; float right{}; float bottom{}; };
         struct Vertex { float x{}, y{}, u{}, v{}; std::uint32_t color{}; };
         enum class TextAlign { left, center, right };
@@ -113,6 +129,11 @@ namespace kopt
         void add_quad(const Rect& rect, float u0, float v0, float u1, float v1, const Color& color);
         void atlas_icon(const Rect& rect, int atlas_x, int atlas_y, int pixel_width, int pixel_height);
         void draw_esp(const Settings& settings, const ArkRuntime& runtime);
+        // Точки-маркеры для того, что прислали тиммейты по шерингу (см.
+        // set_remote_sightings) -- отдельно от draw_esp, потому что у
+        // Sighting есть только координата, не bounds/skeleton живого
+        // Actor'а, так что полноценную ESP-рамку строить не из чего.
+        void draw_remote_sightings(const Settings& settings, const ArkRuntime& runtime);
         void draw_aim_overlay(const Settings& settings, const ArkRuntime& runtime);
         void draw_radar(const Settings& settings, const ArkRuntime& runtime);
         void draw_alerts(const Settings& settings, const ArkRuntime& runtime);
@@ -228,6 +249,7 @@ namespace kopt
         std::chrono::steady_clock::time_point profile_delete_confirmation_until_{};
         std::wstring structure_catalog_search_;
         std::wstring command_search_;
+        std::wstring share_api_key_;
         struct StructureCatalogItem
         {
             std::wstring class_name;

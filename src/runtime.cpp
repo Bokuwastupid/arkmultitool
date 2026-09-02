@@ -804,6 +804,18 @@ namespace kopt
             std::uint64_t linked_id{};
             if (read(snapshot_.local_character + offsets_.linked_player_data_id, linked_id) && linked_id != 0)
                 local_player_data_id_ = linked_id;
+            // Same fields read_actor() reads for every other player Actor,
+            // just off local_character -- keep "sticky" like local_stable_id
+            // (don't blank out a name/tribe we already have just because
+            // this one frame's read comes back empty, e.g. mid-respawn).
+            const std::wstring name = read_fstring(snapshot_.local_character + offsets_.player_name);
+            if (!name.empty()) snapshot_.local_name = name;
+            const std::wstring tribe = read_fstring(snapshot_.local_character + offsets_.tribe_name);
+            if (!tribe.empty()) snapshot_.local_tribe = tribe;
+        }
+        {
+            const std::wstring server_ip = read_remote_server_ip(world);
+            if (!server_ip.empty()) snapshot_.remote_server_ip = server_ip;
         }
         if (snapshot_.local_character == 0 && local_player_data_id_ != 0)
         {
@@ -1591,6 +1603,20 @@ namespace kopt
             [](const wchar_t c) { return std::iswcntrl(c) != 0; }), result.end());
         if (result.size() > 96) result.resize(96);
         return result;
+    }
+
+    std::wstring ArkRuntime::read_remote_server_ip(const std::uintptr_t world)
+    {
+        std::uintptr_t net_driver{};
+        std::uintptr_t connection{};
+        std::int32_t port{};
+        if (!read(world + offsets_.net_driver, net_driver) || net_driver < 0x10000 ||
+            !read(net_driver + offsets_.net_driver_server_connection, connection) || connection < 0x10000 ||
+            !read(connection + offsets_.connection_url_port, port) || port <= 0 || port > 65535)
+            return {};
+        const std::wstring host = read_fstring(connection + offsets_.connection_url_host, 128);
+        if (host.empty()) return {};
+        return host + L":" + std::to_wstring(port);
     }
 
     bool ArkRuntime::read_vec3(const std::uintptr_t address, Vec3& value) const

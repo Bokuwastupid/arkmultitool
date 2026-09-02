@@ -469,8 +469,11 @@ namespace kopt
         panic_key = read_uint(path, L"Bindings", L"Panic", panic_key);
         share_enabled = read_bool(path, L"Share", L"Enabled", share_enabled);
         share_endpoint = read_string(path, L"Share", L"Endpoint");
-        if (share_endpoint.empty()) share_endpoint = L"https://127.0.0.1:8443/v1/share";
+        if (share_endpoint.empty()) share_endpoint = L"127.0.0.1:8443";
+        share_group_id = read_string(path, L"Share", L"GroupId");
+        share_server_ip = read_string(path, L"Share", L"ServerIp");
         share_interval_ms = read_float(path, L"Share", L"IntervalMs", share_interval_ms);
+        share_send_self_position = read_bool(path, L"Share", L"SendSelfPosition", share_send_self_position);
         allied_teams.clear();
         std::wstringstream teams(read_string(path, L"Relations", L"AlliedTeams"));
         std::wstring team_text;
@@ -751,7 +754,10 @@ namespace kopt
         write_uint(path, L"Bindings", L"Panic", panic_key);
         write_bool(path, L"Share", L"Enabled", share_enabled);
         write_value(path, L"Share", L"Endpoint", share_endpoint);
+        write_value(path, L"Share", L"GroupId", share_group_id);
+        write_value(path, L"Share", L"ServerIp", share_server_ip);
         write_float(path, L"Share", L"IntervalMs", share_interval_ms);
+        write_bool(path, L"Share", L"SendSelfPosition", share_send_self_position);
         std::wstring teams;
         for (const auto team : allied_teams)
         {

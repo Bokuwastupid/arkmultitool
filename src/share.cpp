@@ -120,6 +120,32 @@ namespace kopt::share
         return out;
     }
 
+    std::optional<Sighting> build_self_sighting(const Snapshot& snapshot)
+    {
+        if (!snapshot.local_valid) return std::nullopt;
+        Sighting out;
+        out.kind = Kind::player;
+        out.address = snapshot.local_pawn;
+        out.stable_id = snapshot.local_stable_id;
+        out.team = snapshot.local_team;
+        out.x = snapshot.local_position.x;
+        out.y = snapshot.local_position.y;
+        out.z = snapshot.local_position.z;
+        out.label = snapshot.local_name;
+        out.tribe = snapshot.local_tribe;
+        // class_name/health/torpor: not read for the local player anywhere
+        // today (only ever needed for ESP display on OTHER actors) -- left
+        // at Sighting{}'s defaults rather than inventing placeholder
+        // values. has_health/has_torpor already default false, so
+        // max_health==0/max_torpor==0 read correctly on the far end as
+        // "not reported", same as any other actor missing that data. label
+        // is NOT optional like those, though -- ark_relay's
+        // Entity.Validate() rejects (and disconnects) an empty label for
+        // Category player, confirmed live, so it comes from
+        // snapshot.local_name rather than being left blank.
+        return out;
+    }
+
     Notification build_notification(const Alert& a)
     {
         Notification n;

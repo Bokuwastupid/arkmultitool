@@ -141,4 +141,20 @@ namespace kopt::share
     // которых нет построителя, молча пропускаются -- не ошибка, просто вне
     // объёма шеринга (CatOther-подобные, служебные точки карты и т.п.).
     [[nodiscard]] std::vector<Sighting> build_sightings(const std::vector<Actor>& actors);
+
+    // Локальный игрок никогда не попадает в snapshot.actors -- ArkRuntime
+    // намеренно исключает его на этапе обнаружения (см. update() в
+    // runtime.cpp: адрес local_pawn/local_character явно пропускается),
+    // потому что actors -- это "что я вижу вокруг", а не "где я сам", и
+    // ESP-оверлею собственная рамка на себе не нужна. Для шеринга это ровно
+    // обратное: тиммейтам нужны именно свои координаты отправителя. Читает
+    // только уже собранные snapshot.local_* поля -- нового обращения к
+    // памяти игры не требует. Возвращает nullopt, когда !local_valid (нет
+    // валидного пешки -- нечего сообщать).
+    //
+    // address = local_pawn: тот же смысл, что у Sighting::address для любого
+    // обычного актора -- ключ ChangeFilter (address, class_name) внутри
+    // одного клиента, не межклиентский идентификатор (для этого служит
+    // stable_id = local_stable_id).
+    [[nodiscard]] std::optional<Sighting> build_self_sighting(const Snapshot& snapshot);
 }
