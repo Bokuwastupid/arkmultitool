@@ -1,10 +1,20 @@
 # Running the inject on a real Windows machine
 
 This covers getting `kopt_payload.dll` + `kopt_injector.exe` onto a Windows
-box and actually injecting into a running `ShooterGame.exe`. Nothing below
-has been exercised against a live game — it's been build-verified (mingw
-cross-compile produces valid PE64, links clean) but not run-verified. Test
-the golden path yourself before relying on it.
+box and actually injecting into a running `ShooterGame.exe`.
+
+The mingw-built binaries below are **run-verified, not just
+build-verified**: `scripts/launch-proton.sh` injected this exact
+`kopt_injector.exe`/`kopt_payload.dll` pair into a real `ShooterGame.exe`
+session under Proton — DXGI hooks installed, in-game menu opened/closed on
+hotkey, freecam toggled, and the QUIC share connection completed its
+handshake against a local relay and stayed connected (`build-mingw/dist/
+kopt_internal.log` has the full session). Proton runs the identical PE64
+binaries against the same Win32/DXGI surface bare Windows exposes, so this
+is strong evidence the injector and payload themselves work correctly —
+what's specifically untested is the bare-Windows manual-attach flow this
+document describes (no Proton translation layer in between). Test that
+golden path yourself before relying on it.
 
 ## 1. Prerequisites
 
@@ -36,9 +46,9 @@ yet.** Two real options exist, and only one currently works end-to-end:
 So: build with mingw (Linux, or MSYS2's mingw64 shell on Windows itself —
 untested here but same toolchain, should work), then copy the output.
 
-From the build machine, after `scripts/build-linux.sh` (or the manual
-CMake invocation in `docs/LINUX_BUILD.md`), copy these to one folder on
-the Windows box:
+From the build machine, run `scripts/build-linux.sh` (auto-detects your
+distro's package manager for missing tools, see `docs/LINUX_BUILD.md`),
+then copy these to one folder on the Windows box:
 
 ```
 build-mingw/dist/kopt_payload.dll
