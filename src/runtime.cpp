@@ -2108,14 +2108,32 @@ namespace kopt
         {
             freecam_mouse_x_.store(0, std::memory_order_relaxed);
             freecam_mouse_y_.store(0, std::memory_order_relaxed);
-            if (freecam_was_enabled_ && freecam_pov_ >= 0x10000)
+            // freecam_pov_ was captured whenever freecam was last enabled or
+            // last saw the camera move (see the "moved > 1.0F" branch
+            // below) -- potentially many ticks before this exact frame. If
+            // the local pawn/controller got recreated in between (a
+            // respawn, a possession change -- this game's local-runtime
+            // invalidate/revalidate cycle is not rare, see
+            // read_local()'s invalidate_local()), the OLD camera manager
+            // freecam_pov_ points into may already be freed and reused for
+            // something else entirely. `pov` above is freshly recomputed
+            // from THIS frame's live camera_manager read -- only trust
+            // freecam_pov_ for the restore-write if it still matches that
+            // live address; a mismatch means we're not looking at the same
+            // manager we cached, and writing anyway is a stale-pointer
+            // write into arbitrary memory, not a real restore. (Found via
+            // a live crash: two ACCESS_VIOLATIONs at an address nowhere
+            // near this module, immediately after disabling freecam --
+            // consistent with corrupting unrelated heap memory here that
+            // only crashed later, elsewhere.)
+            if (freecam_was_enabled_ && freecam_pov_ >= 0x10000 && freecam_pov_ == pov)
             {
                 write(freecam_pov_, freecam_restore_position_);
                 write(freecam_pov_ + 0xC, freecam_restore_rotation_);
                 if (freecam_restore_fov_ >= 10.0F && freecam_restore_fov_ <= 170.0F)
                     write(freecam_pov_ + 0x28, freecam_restore_fov_);
-                freecam_pov_ = 0;
             }
+            freecam_pov_ = 0;
             freecam_was_enabled_ = false;
             return;
         }
@@ -2348,12 +2366,25 @@ namespace kopt
     {
         restore_no_recoil();
         restore_no_sway();
+        // Same staleness risk as run_camera()'s disable branch (see its
+        // comment) -- freecam_pov_ may be many ticks old by the time
+        // unload gets here, and this is called from arbitrary unload
+        // timing, not a fresh per-frame tick, so the risk of the cached
+        // manager having been freed/replaced underneath us is if anything
+        // higher here. Re-derive the CURRENT camera pov the same way
+        // run_camera() does and only restore if it still matches.
         if (freecam_was_enabled_ && freecam_pov_ >= 0x10000)
         {
-            write(freecam_pov_, freecam_restore_position_);
-            write(freecam_pov_ + 0xC, freecam_restore_rotation_);
-            if (freecam_restore_fov_ >= 10.0F && freecam_restore_fov_ <= 170.0F)
-                write(freecam_pov_ + 0x28, freecam_restore_fov_);
+            std::uintptr_t manager{};
+            const auto pov = read(snapshot_.local_controller + offsets_.camera_manager, manager) && manager >= 0x10000 ?
+                manager + offsets_.camera_cache + offsets_.camera_pov : std::uintptr_t{};
+            if (freecam_pov_ == pov)
+            {
+                write(freecam_pov_, freecam_restore_position_);
+                write(freecam_pov_ + 0xC, freecam_restore_rotation_);
+                if (freecam_restore_fov_ >= 10.0F && freecam_restore_fov_ <= 170.0F)
+                    write(freecam_pov_ + 0x28, freecam_restore_fov_);
+            }
         }
         freecam_was_enabled_ = false;
         freecam_pov_ = 0;
