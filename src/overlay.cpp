@@ -308,23 +308,11 @@ namespace
         return stream.str();
     }
 
-    enum class PlayerEspState
-    {
-        awake,
-        sleeping,
-        knocked_out,
-        dead
-    };
-
-    PlayerEspState player_esp_state(const kopt::Actor& actor)
-    {
-        if (kopt::actor_is_dead(actor)) return PlayerEspState::dead;
-        const float torpor_ratio = actor.max_torpor > 0.0F ?
-            std::clamp(actor.torpor / actor.max_torpor, 0.0F, 1.0F) : 0.0F;
-        if (torpor_ratio >= 0.95F) return PlayerEspState::knocked_out;
-        if (actor.sleeping) return PlayerEspState::sleeping;
-        return PlayerEspState::awake;
-    }
+    // Moved to kopt::PlayerEspState/player_esp_state (runtime.hpp) so
+    // relay_client's sighting export uses the exact same classification
+    // instead of a second copy that could drift.
+    using PlayerEspState = kopt::PlayerEspState;
+    using kopt::player_esp_state;
 
     bool player_recently_rendered(const kopt::Snapshot& snapshot, const kopt::Actor& actor,
         const float grace_ms)
@@ -2646,6 +2634,11 @@ namespace kopt
         }
         else
         {
+            checkbox(L"Share sightings & alerts with team", settings.share_enabled, content_left, y, input);
+            text(share_connected_ ? L"Share: connected" : L"Share: offline",
+                {content_left + 2.0F, y, frame.right - 32.0F, y + 28.0F},
+                share_connected_ ? success : text_secondary, 12.0F);
+            y += 40.0F;
             checkbox(L"Record Aim Lab trace (30 Hz / 20 seconds)", settings.aim_lab_recording,
                 content_left, y, input);
             const std::size_t trace_size = runtime.aim_trace_size();

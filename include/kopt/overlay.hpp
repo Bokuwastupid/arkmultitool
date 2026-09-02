@@ -92,7 +92,14 @@ namespace kopt
         void render(IDXGISwapChain* swap_chain, Settings& settings, ArkRuntime& runtime,
             InputState& input, const std::filesystem::path& settings_path);
 
+        // Оверлей не знает о kopt::Publisher и не должен -- рисование не
+        // зависит от транспорта. payload.cpp зовёт это раз в кадр перед
+        // render(), чтобы Diagnostics-вкладка могла показать статус
+        // соединения без прямой связи с сетевым слоем.
+        void set_share_connected(bool connected) noexcept { share_connected_ = connected; }
+
     private:
+        bool share_connected_{};
         struct Rect { float left{}; float top{}; float right{}; float bottom{}; };
         struct Vertex { float x{}, y{}, u{}, v{}; std::uint32_t color{}; };
         enum class TextAlign { left, center, right };

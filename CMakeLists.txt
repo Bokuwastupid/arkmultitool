@@ -17,6 +17,9 @@ add_library(kopt_payload SHARED
     src/overlay.cpp
     src/payload.cpp
     src/runtime.cpp
+    src/share.cpp
+    src/share_filter.cpp
+    src/share_remote.cpp
 )
 target_include_directories(kopt_payload PRIVATE include)
 target_compile_definitions(kopt_payload PRIVATE
@@ -61,16 +64,39 @@ target_compile_definitions(kopt_injector PRIVATE
 )
 target_link_libraries(kopt_injector PRIVATE advapi32 psapi bcrypt)
 
+# Standalone smoke test for kopt::share's DTO builders, ChangeFilter, and
+# ReporterFilter -- none of the three touch game memory or the network, so
+# this needs neither D3D11 nor a live process, same "no test framework, run
+# it manually, non-zero exit on failure" shape kopt_relay_test used for
+# RelayClient. kopt_share_test (the network-facing counterpart, exercising
+# kopt::Http3Publisher against a real QUIC/HTTP-3 handshake) lands together
+# with the transport itself -- see the DTO-sharing plan, step 7.
+add_executable(kopt_share_selftest
+    src/share.cpp
+    src/share_filter.cpp
+    src/share_remote.cpp
+    src/share_selftest_main.cpp
+)
+target_include_directories(kopt_share_selftest PRIVATE include)
+target_compile_definitions(kopt_share_selftest PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+)
+
 if(MSVC)
-    set_property(TARGET kopt_payload kopt_injector kopt_version_proxy PROPERTY
+    set_property(TARGET kopt_payload kopt_injector kopt_version_proxy kopt_share_selftest PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     target_compile_options(kopt_payload PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_injector PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_version_proxy PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_compile_options(kopt_share_selftest PRIVATE /W4 /permissive- /EHsc /utf-8)
 else()
     target_compile_options(kopt_payload PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_injector PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_version_proxy PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(kopt_share_selftest PRIVATE -Wall -Wextra -Wpedantic)
     # Fully static, not just -static-libgcc/-libstdc++: the nixpkgs
     # mingw-w64 cross toolchain defaults to the mcfgthread threading model,
     # whose runtime (libmcfgthread-2.dll) ships as a DLL that exists
@@ -85,9 +111,10 @@ else()
     target_link_options(kopt_payload PRIVATE -static)
     target_link_options(kopt_injector PRIVATE -static -municode)
     target_link_options(kopt_version_proxy PRIVATE -static)
+    target_link_options(kopt_share_selftest PRIVATE -static)
 endif()
 
-foreach(target kopt_payload kopt_injector kopt_version_proxy)
+foreach(target kopt_payload kopt_injector kopt_version_proxy kopt_share_selftest)
     set_target_properties(${target} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dist"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dist"

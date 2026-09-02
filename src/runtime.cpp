@@ -812,6 +812,7 @@ namespace kopt
             });
             if (local_actor != snapshot_.actors.end()) snapshot_.local_character = local_actor->address;
         }
+        snapshot_.local_stable_id = local_player_data_id_;
         read(world + offsets_.world_time_seconds, snapshot_.world_time);
         if (!std::isfinite(snapshot_.world_time) || snapshot_.world_time < 0.0) snapshot_.world_time = 0.0;
 
@@ -1128,7 +1129,8 @@ namespace kopt
             const std::wstring display_tribe = !actor.tribe.empty() ? actor.tribe :
                 (actor.kind == ActorKind::player ? L"Unknown tribe" : L"");
             append_alert({0, kind, title, display_name, display_tribe,
-                distance(actor.position, snapshot_.local_position) / 100.0F, value, 0.0F});
+                distance(actor.position, snapshot_.local_position) / 100.0F, value, 0.0F,
+                actor.position});
         };
 
         int enemy_group_count{};

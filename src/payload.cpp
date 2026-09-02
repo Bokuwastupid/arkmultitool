@@ -1,7 +1,11 @@
 #include "kopt/config.hpp"
 #include "kopt/com_ptr.hpp"
 #include "kopt/overlay.hpp"
+#include "kopt/publisher.hpp"
 #include "kopt/runtime.hpp"
+#include "kopt/share.hpp"
+#include "kopt/share_filter.hpp"
+#include "kopt/share_remote.hpp"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -18,6 +22,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -32,9 +37,44 @@ namespace
     using DrawIndexedFn = void(__stdcall*)(ID3D11DeviceContext*, UINT, UINT, INT);
     using DrawIndexedInstancedFn = void(__stdcall*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
 
+    // Read once at the point of use, never cached in a global or written to
+    // kopt_internal.ini -- same "in memory only" policy the loader already
+    // applies to its own tokens (see config.hpp's Share section doc
+    // comment, which documented this exact env-var plan before the
+    // implementation caught up to it). Empty means "not configured";
+    // start() below refuses to run with an empty token rather than
+    // connecting unauthenticated.
+    std::wstring read_share_token()
+    {
+        wchar_t buffer[4096];
+        const DWORD length = GetEnvironmentVariableW(L"KOPT_SHARE_TOKEN", buffer, static_cast<DWORD>(std::size(buffer)));
+        if (length == 0 || length >= std::size(buffer)) return {};
+        return std::wstring(buffer, length);
+    }
+
     HMODULE g_module{};
     kopt::Settings g_settings;
     kopt::ArkRuntime g_runtime;
+    // Publisher вместо конкретного RelayClient -- NoopPublisher, пока
+    // Http3Publisher (QUIC/HTTP-3) не собран; переключение на реальный
+    // транспорт -- замена этой единственной строки, ничего в тик-цикле не
+    // меняется (см. план DTO-слоя, шаг 7).
+    std::unique_ptr<kopt::Publisher> g_publisher = std::make_unique<kopt::NoopPublisher>();
+    std::chrono::steady_clock::time_point g_last_share_submit{};
+    bool g_share_was_enabled{};
+    // Память о СВОИХ последних отправленных состояниях (не спамить
+    // неизменным) -- один экземпляр на весь процесс, пересоздание каждый
+    // тик обнулило бы память и превратило фильтр в no-op.
+    kopt::share::ChangeFilter g_share_filter;
+    // Буфер принятых батчей от других репортёров команды, с протуханием.
+    // ttl длиннее самого долгого keyframe-интервала источника (30 с) с
+    // запасом -- иначе собственный маячок отправителя будет считаться
+    // протухшим раньше, чем он успел повториться.
+    kopt::share::RemoteView g_remote_view{std::chrono::milliseconds(45000)};
+    // subscribe() зовёт колбэк с фонового read-потока Publisher'а, а
+    // g_remote_view читается с потока Present-хука -- без мьютекса это была
+    // бы гонка на одной и той же unordered_map.
+    std::mutex g_remote_view_mutex;
     kopt::Overlay g_overlay;
     kopt::InputState g_input;
     std::filesystem::path g_settings_path;
@@ -614,6 +654,7 @@ namespace
     }
 
     bool capture_binding(int key, bool suppress_key_up);
+    void on_remote_batch(kopt::share::RemoteBatch batch);
 
     int sided_modifier_key(const int key, const LPARAM lparam)
     {
@@ -952,6 +993,59 @@ namespace
                 g_overlay.update_feature_hotkeys(g_settings);
                 g_runtime.update(g_settings, delta_seconds);
                 const auto& snapshot = g_runtime.snapshot();
+                // Живой старт/стоп: тумблер в интерфейсе (Diagnostics-таб)
+                // меняет g_settings.share_enabled в любой момент, а не
+                // только на загрузке payload'а -- без этой проверки
+                // включение шера в рантайме молчало бы до перезапуска.
+                if (g_settings.share_enabled != g_share_was_enabled)
+                {
+                    g_share_was_enabled = g_settings.share_enabled;
+                    if (g_settings.share_enabled)
+                    {
+                        const std::wstring token = read_share_token();
+                        if (token.empty())
+                        {
+                            // g_share_was_enabled is already set to true above --
+                            // deliberately NOT reset to false here: an env var is
+                            // fixed for the lifetime of this process, retrying
+                            // every tick could never succeed and would just log
+                            // (synchronous file I/O) on every single frame.
+                            log_line(L"Share enabled in settings but KOPT_SHARE_TOKEN is not set; not starting publisher");
+                        }
+                        else
+                        {
+                            log_line(std::format(L"Starting share publisher: {}", g_settings.share_endpoint));
+                            g_publisher->start(g_settings.share_endpoint, token);
+                            g_publisher->subscribe(on_remote_batch);
+                        }
+                    }
+                    else
+                    {
+                        g_publisher->stop();
+                    }
+                }
+                if (g_settings.share_enabled &&
+                    std::chrono::duration<float, std::milli>(now - g_last_share_submit).count() >=
+                        g_settings.share_interval_ms)
+                {
+                    g_last_share_submit = now;
+                    // build_sightings() -- то же самое множество акторов,
+                    // что уже наполняет ESP этот кадр: источник правды здесь,
+                    // а не отдельный пересчёт "что показать по сети".
+                    const std::vector<kopt::share::Sighting> all_sightings =
+                        kopt::share::build_sightings(snapshot.actors);
+                    g_publisher->submit_sightings(
+                        g_share_filter.filter(all_sightings, now),
+                        g_share_filter.collect_vanished(all_sightings));
+                    if (!snapshot.alerts.empty())
+                    {
+                        std::vector<kopt::share::Notification> notifications;
+                        notifications.reserve(snapshot.alerts.size());
+                        for (const kopt::Alert& alert : snapshot.alerts)
+                            notifications.push_back(kopt::share::build_notification(alert));
+                        g_publisher->submit_notifications(std::move(notifications));
+                    }
+                }
                 if (snapshot.world_generation != g_logged_world_generation)
                 {
                     g_logged_world_generation = snapshot.world_generation;
@@ -976,6 +1070,7 @@ namespace
                         guard_hits));
                 }
                 ensure_camera_hook();
+                g_overlay.set_share_connected(g_publisher->connected());
                 g_overlay.render(swap_chain, g_settings, g_runtime, g_input, g_settings_path);
                 if (g_input.diagnostics_bundle_requested.exchange(false, std::memory_order_acq_rel))
                 {
@@ -1144,6 +1239,29 @@ namespace
         return std::filesystem::path(buffer).parent_path();
     }
 
+    // Приёмный колбэк подписки Publisher::subscribe -- вызывается на
+    // фоновом read-потоке реализации транспорта, поэтому: (1) не трогает
+    // ничего из hot-path Present-хука напрямую, только g_remote_view под
+    // мьютексом; (2) сам дедуплицирует по репортёру через ReporterFilter,
+    // не полагаясь на то, что сервер уже отфильтровал.
+    //
+    // ReporterFilter строится заново на каждый батч, а не кэшируется: оба
+    // его параметра (own_stable_id, радиус) могут поменяться между вызовами
+    // -- локальный игрок определяется не сразу после входа в игру, а радиус
+    // "esp_distance_m" настраивается вручную -- и сам объект тривиален
+    // (два поля), пересоздание стоит меньше, чем синхронизация кеша.
+    void on_remote_batch(kopt::share::RemoteBatch batch)
+    {
+        const auto& snapshot = g_runtime.snapshot();
+        if (!snapshot.local_valid) return; // своя позиция ещё не известна -- решить "рядом или нет" нечем
+        const kopt::share::ReporterFilter filter(snapshot.local_stable_id,
+            g_settings.esp_distance_m * 100.0F);
+        if (!filter.accept(batch.reporter_stable_id, batch.reporter_position, snapshot.local_position)) return;
+        batch.received_at = std::chrono::steady_clock::now();
+        const std::lock_guard<std::mutex> lock(g_remote_view_mutex);
+        g_remote_view.update(std::move(batch));
+    }
+
     DWORD WINAPI worker(void*)
     {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -1180,6 +1298,7 @@ namespace
             !g_unload_cleanup_completed.load(std::memory_order_acquire); ++attempt) Sleep(10);
         uninstall_hooks();
         while (g_active_callbacks.load() != 0) Sleep(1);
+        g_publisher->stop();
         g_runtime.restore_transient_state();
         remove_game_exception_guard();
         SetUnhandledExceptionFilter(g_previous_exception_filter);

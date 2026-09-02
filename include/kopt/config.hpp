@@ -252,6 +252,24 @@ namespace kopt
         std::vector<std::int32_t> allied_teams;
         std::vector<FeatureBinding> feature_bindings;
 
+        // Шеринг sightings/notifications с остальной командой поверх
+        // HTTP/3 -- see kopt::Publisher (publisher.hpp). Переименовано из
+        // relay_*: смысл поля расширился с "WS-релей игроков/дино" до
+        // общего двустороннего шеринга (структуры/турели/уведомления,
+        // HTTP/3-транспорт вместо WinHTTP WS), и держать старое имя значило
+        // бы врать о том, что внутри. Старые конфиги с секцией [Relay]
+        // молча получат значения по умолчанию (шер выключен) -- осознанная
+        // цена полной замены транспорта, не тихая потеря данных: умолчание
+        // безопасной стороны.
+        //
+        // Токен авторизации намеренно не поле здесь -- приходит только из
+        // переменной окружения (см. kShareDevToken/KOPT_SHARE_TOKEN),
+        // та же политика "только в памяти", что и у токенов загрузчика, --
+        // чтобы он никогда не оказался в этом текстовом ini.
+        bool share_enabled{false};
+        std::wstring share_endpoint{L"https://127.0.0.1:8443/v1/share"};
+        float share_interval_ms{1000.0F};
+
         void normalize();
         bool load(const std::filesystem::path& path);
         bool save(const std::filesystem::path& path) const;

@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <array>
@@ -73,6 +74,27 @@ namespace kopt
         return actor.dead || (actor.max_health > 0.0F && actor.health <= 0.0F);
     }
 
+    enum class PlayerEspState : std::uint8_t
+    {
+        awake,
+        sleeping,
+        knocked_out,
+        dead
+    };
+
+    // Shared by overlay.cpp (ESP label/color) and relay_client's sighting
+    // export -- both need the same "what is this player doing right now"
+    // classification, and it was drifting out of sync as two copies before.
+    [[nodiscard]] inline PlayerEspState player_esp_state(const Actor& actor) noexcept
+    {
+        if (actor_is_dead(actor)) return PlayerEspState::dead;
+        const float torpor_ratio = actor.max_torpor > 0.0F ?
+            std::clamp(actor.torpor / actor.max_torpor, 0.0F, 1.0F) : 0.0F;
+        if (torpor_ratio >= 0.95F) return PlayerEspState::knocked_out;
+        if (actor.sleeping) return PlayerEspState::sleeping;
+        return PlayerEspState::awake;
+    }
+
     struct Camera
     {
         Vec3 location{};
@@ -126,6 +148,13 @@ namespace kopt
         float distance_m{};
         float value{};
         float remaining_s{};
+        // Абсолютная позиция цели, породившей событие. distance_m одного
+        // достаточно для локальной карточки (та же точка отсчёта, что у
+        // игрока, который её видит), но бесполезно на другом конце канала
+        // шеринга без своей точки отсчёта -- см. kopt::share::Notification.
+        // У групповых тревог (AlertKind::enemy_group) единой цели нет --
+        // остаётся нулевым, это не баг, а честное отсутствие точки.
+        Vec3 position{};
     };
 
     struct Snapshot
@@ -139,6 +168,14 @@ namespace kopt
         std::uintptr_t local_controller{};
         std::uintptr_t local_pawn{};
         std::uintptr_t local_character{};
+        // Игровой account-id локального игрока (linked_player_data_id) --
+        // тот же id, что уже кладётся в Actor::linked_player_data_id для
+        // остальных игроков. Нужен отдельным полем, а не поиском по
+        // local_character в actors: значение "липкое" (см. update()) и
+        // остаётся известным даже в кадрах, где local_character временно не
+        // резолвится, а kopt::share нужен именно устойчивый id для тега
+        // reported_by и дедупликации своих же отчётов на приёме.
+        std::uint64_t local_stable_id{};
         std::uintptr_t camera_manager{};
         std::int32_t local_team{};
         bool local_mounted{};
