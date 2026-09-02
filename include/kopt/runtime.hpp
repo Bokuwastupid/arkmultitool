@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <array>
@@ -73,6 +74,27 @@ namespace kopt
         return actor.dead || (actor.max_health > 0.0F && actor.health <= 0.0F);
     }
 
+    enum class PlayerEspState : std::uint8_t
+    {
+        awake,
+        sleeping,
+        knocked_out,
+        dead
+    };
+
+    // Shared by overlay.cpp (ESP label/color) and relay_client's sighting
+    // export -- both need the same "what is this player doing right now"
+    // classification, and it was drifting out of sync as two copies before.
+    [[nodiscard]] inline PlayerEspState player_esp_state(const Actor& actor) noexcept
+    {
+        if (actor_is_dead(actor)) return PlayerEspState::dead;
+        const float torpor_ratio = actor.max_torpor > 0.0F ?
+            std::clamp(actor.torpor / actor.max_torpor, 0.0F, 1.0F) : 0.0F;
+        if (torpor_ratio >= 0.95F) return PlayerEspState::knocked_out;
+        if (actor.sleeping) return PlayerEspState::sleeping;
+        return PlayerEspState::awake;
+    }
+
     struct Camera
     {
         Vec3 location{};
@@ -126,6 +148,13 @@ namespace kopt
         float distance_m{};
         float value{};
         float remaining_s{};
+        // Абсолютная позиция цели, породившей событие. distance_m одного
+        // достаточно для локальной карточки (та же точка отсчёта, что у
+        // игрока, который её видит), но бесполезно на другом конце канала
+        // шеринга без своей точки отсчёта -- см. kopt::share::Notification.
+        // У групповых тревог (AlertKind::enemy_group) единой цели нет --
+        // остаётся нулевым, это не баг, а честное отсутствие точки.
+        Vec3 position{};
     };
 
     struct Snapshot
@@ -139,6 +168,34 @@ namespace kopt
         std::uintptr_t local_controller{};
         std::uintptr_t local_pawn{};
         std::uintptr_t local_character{};
+        // Игровой account-id локального игрока (linked_player_data_id) --
+        // тот же id, что уже кладётся в Actor::linked_player_data_id для
+        // остальных игроков. Нужен отдельным полем, а не поиском по
+        // local_character в actors: значение "липкое" (см. update()) и
+        // остаётся известным даже в кадрах, где local_character временно не
+        // резолвится, а kopt::share нужен именно устойчивый id для тега
+        // reported_by и дедупликации своих же отчётов на приёме.
+        std::uint64_t local_stable_id{};
+        // Собственные имя/трайб -- читаются тем же offsets_.player_name/
+        // tribe_name, что и для любого другого Actor::kind == player (см.
+        // read_actor() в runtime.cpp), просто по local_character вместо
+        // чужого адреса. Нужны как отдельные поля (не через actors -- self
+        // туда никогда не попадает, см. share.hpp::build_self_sighting):
+        // ark_relay's Entity.Validate() требует непустой label для
+        // Category player/dino, так что пустая строка здесь -- не
+        // "красивее", а разрывает всё QUIC-соединение отправителя.
+        std::wstring local_name;
+        std::wstring local_tribe;
+        // Реальный адрес игрового сервера ("ip:port"), прочитанный из
+        // UWorld->NetDriver->ServerConnection->URL (см. Offsets::net_driver
+        // и read_remote_server_ip() в runtime.cpp) -- закрывает пробел из
+        // плана DTO-шеринга §4: раньше server_ip для kopt::share был только
+        // ручным значением из kopt_internal.ini, теперь клиент узнаёт его
+        // сам при подключении к серверу, как и было задумано изначально.
+        // Липко, как local_stable_id -- не затирается пустым значением на
+        // кадре, где чтение временно не удалось. Пусто, пока не резолвится
+        // (загрузочный экран/меню, ещё не в игре).
+        std::wstring remote_server_ip;
         std::uintptr_t camera_manager{};
         std::int32_t local_team{};
         bool local_mounted{};
@@ -221,6 +278,18 @@ namespace kopt
             std::uintptr_t status_max_values{0xD8};
             std::uintptr_t character_mesh{0x4F8};
             std::uintptr_t mesh_space_bases{0x688};
+            // UWorld->NetDriver->ServerConnection->URL.Host/Port -- нашли
+            // живым сканом по имени класса (см. историю ArkRuntime::
+            // scan_net_connection в git-логе), не документированы Wildcard
+            // нигде. NetDriver/ServerConnection на этой сборке резолвятся в
+            // SteamNetDriver/SteamNetConnection (ARK поверх Steam
+            // Networking Sockets, не голый UE4 IpNetDriver) -- если
+            // Wildcard когда-нибудь сменит транспорт, эти четыре оффсета
+            // нужно переоткрывать заново тем же приёмом, не гадать.
+            std::uintptr_t net_driver{0x108};
+            std::uintptr_t net_driver_server_connection{0x78};
+            std::uintptr_t connection_url_host{0xF0};
+            std::uintptr_t connection_url_port{0x100};
         } offsets_{};
 
         bool resolve_globals();
@@ -234,6 +303,13 @@ namespace kopt
         float read_item_stat(std::uintptr_t item, int stat_index) const;
         ClassMeta class_meta(std::uintptr_t class_address);
         std::wstring object_name(std::uintptr_t object_address);
+        // Читает UWorld->NetDriver->ServerConnection->URL.Host/Port через
+        // Offsets::net_driver/net_driver_server_connection/
+        // connection_url_host/connection_url_port (см. их doc-комментарий).
+        // Возвращает пусто, если любое из чтений по цепочке не удалось --
+        // snapshot_.remote_server_ip остаётся прежним значением (липко),
+        // не затирается.
+        std::wstring read_remote_server_ip(std::uintptr_t world);
         std::wstring resolve_name(std::int32_t index, std::int32_t number);
         std::wstring read_fstring(std::uintptr_t address, std::size_t cap = 256);
         bool read_vec3(std::uintptr_t address, Vec3& value) const;

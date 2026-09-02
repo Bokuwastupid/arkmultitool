@@ -804,6 +804,18 @@ namespace kopt
             std::uint64_t linked_id{};
             if (read(snapshot_.local_character + offsets_.linked_player_data_id, linked_id) && linked_id != 0)
                 local_player_data_id_ = linked_id;
+            // Same fields read_actor() reads for every other player Actor,
+            // just off local_character -- keep "sticky" like local_stable_id
+            // (don't blank out a name/tribe we already have just because
+            // this one frame's read comes back empty, e.g. mid-respawn).
+            const std::wstring name = read_fstring(snapshot_.local_character + offsets_.player_name);
+            if (!name.empty()) snapshot_.local_name = name;
+            const std::wstring tribe = read_fstring(snapshot_.local_character + offsets_.tribe_name);
+            if (!tribe.empty()) snapshot_.local_tribe = tribe;
+        }
+        {
+            const std::wstring server_ip = read_remote_server_ip(world);
+            if (!server_ip.empty()) snapshot_.remote_server_ip = server_ip;
         }
         if (snapshot_.local_character == 0 && local_player_data_id_ != 0)
         {
@@ -812,6 +824,7 @@ namespace kopt
             });
             if (local_actor != snapshot_.actors.end()) snapshot_.local_character = local_actor->address;
         }
+        snapshot_.local_stable_id = local_player_data_id_;
         read(world + offsets_.world_time_seconds, snapshot_.world_time);
         if (!std::isfinite(snapshot_.world_time) || snapshot_.world_time < 0.0) snapshot_.world_time = 0.0;
 
@@ -1128,7 +1141,8 @@ namespace kopt
             const std::wstring display_tribe = !actor.tribe.empty() ? actor.tribe :
                 (actor.kind == ActorKind::player ? L"Unknown tribe" : L"");
             append_alert({0, kind, title, display_name, display_tribe,
-                distance(actor.position, snapshot_.local_position) / 100.0F, value, 0.0F});
+                distance(actor.position, snapshot_.local_position) / 100.0F, value, 0.0F,
+                actor.position});
         };
 
         int enemy_group_count{};
@@ -1589,6 +1603,20 @@ namespace kopt
             [](const wchar_t c) { return std::iswcntrl(c) != 0; }), result.end());
         if (result.size() > 96) result.resize(96);
         return result;
+    }
+
+    std::wstring ArkRuntime::read_remote_server_ip(const std::uintptr_t world)
+    {
+        std::uintptr_t net_driver{};
+        std::uintptr_t connection{};
+        std::int32_t port{};
+        if (!read(world + offsets_.net_driver, net_driver) || net_driver < 0x10000 ||
+            !read(net_driver + offsets_.net_driver_server_connection, connection) || connection < 0x10000 ||
+            !read(connection + offsets_.connection_url_port, port) || port <= 0 || port > 65535)
+            return {};
+        const std::wstring host = read_fstring(connection + offsets_.connection_url_host, 128);
+        if (host.empty()) return {};
+        return host + L":" + std::to_wstring(port);
     }
 
     bool ArkRuntime::read_vec3(const std::uintptr_t address, Vec3& value) const
@@ -2106,14 +2134,32 @@ namespace kopt
         {
             freecam_mouse_x_.store(0, std::memory_order_relaxed);
             freecam_mouse_y_.store(0, std::memory_order_relaxed);
-            if (freecam_was_enabled_ && freecam_pov_ >= 0x10000)
+            // freecam_pov_ was captured whenever freecam was last enabled or
+            // last saw the camera move (see the "moved > 1.0F" branch
+            // below) -- potentially many ticks before this exact frame. If
+            // the local pawn/controller got recreated in between (a
+            // respawn, a possession change -- this game's local-runtime
+            // invalidate/revalidate cycle is not rare, see
+            // read_local()'s invalidate_local()), the OLD camera manager
+            // freecam_pov_ points into may already be freed and reused for
+            // something else entirely. `pov` above is freshly recomputed
+            // from THIS frame's live camera_manager read -- only trust
+            // freecam_pov_ for the restore-write if it still matches that
+            // live address; a mismatch means we're not looking at the same
+            // manager we cached, and writing anyway is a stale-pointer
+            // write into arbitrary memory, not a real restore. (Found via
+            // a live crash: two ACCESS_VIOLATIONs at an address nowhere
+            // near this module, immediately after disabling freecam --
+            // consistent with corrupting unrelated heap memory here that
+            // only crashed later, elsewhere.)
+            if (freecam_was_enabled_ && freecam_pov_ >= 0x10000 && freecam_pov_ == pov)
             {
                 write(freecam_pov_, freecam_restore_position_);
                 write(freecam_pov_ + 0xC, freecam_restore_rotation_);
                 if (freecam_restore_fov_ >= 10.0F && freecam_restore_fov_ <= 170.0F)
                     write(freecam_pov_ + 0x28, freecam_restore_fov_);
-                freecam_pov_ = 0;
             }
+            freecam_pov_ = 0;
             freecam_was_enabled_ = false;
             return;
         }
@@ -2346,12 +2392,25 @@ namespace kopt
     {
         restore_no_recoil();
         restore_no_sway();
+        // Same staleness risk as run_camera()'s disable branch (see its
+        // comment) -- freecam_pov_ may be many ticks old by the time
+        // unload gets here, and this is called from arbitrary unload
+        // timing, not a fresh per-frame tick, so the risk of the cached
+        // manager having been freed/replaced underneath us is if anything
+        // higher here. Re-derive the CURRENT camera pov the same way
+        // run_camera() does and only restore if it still matches.
         if (freecam_was_enabled_ && freecam_pov_ >= 0x10000)
         {
-            write(freecam_pov_, freecam_restore_position_);
-            write(freecam_pov_ + 0xC, freecam_restore_rotation_);
-            if (freecam_restore_fov_ >= 10.0F && freecam_restore_fov_ <= 170.0F)
-                write(freecam_pov_ + 0x28, freecam_restore_fov_);
+            std::uintptr_t manager{};
+            const auto pov = read(snapshot_.local_controller + offsets_.camera_manager, manager) && manager >= 0x10000 ?
+                manager + offsets_.camera_cache + offsets_.camera_pov : std::uintptr_t{};
+            if (freecam_pov_ == pov)
+            {
+                write(freecam_pov_, freecam_restore_position_);
+                write(freecam_pov_ + 0xC, freecam_restore_rotation_);
+                if (freecam_restore_fov_ >= 10.0F && freecam_restore_fov_ <= 170.0F)
+                    write(freecam_pov_ + 0x28, freecam_restore_fov_);
+            }
         }
         freecam_was_enabled_ = false;
         freecam_pov_ = 0;
