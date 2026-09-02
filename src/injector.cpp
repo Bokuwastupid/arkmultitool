@@ -373,8 +373,7 @@ namespace
 
     bool request_unload(const DWORD pid, std::wstring& error)
     {
-        Handle process(OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-            FALSE, pid));
+        Handle process(OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid));
         if (!process)
         {
             error = L"OpenProcess failed (error " + std::to_wstring(GetLastError()) + L")";
@@ -391,33 +390,29 @@ namespace
             error = L"No KOPT payload is loaded";
             return false;
         }
-        const HMODULE local_image = LoadLibraryExW(loaded->path.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
-        if (local_image == nullptr)
+        // Signals a named event the payload waits on (see payload.cpp's
+        // worker(), g_unload_event) instead of CreateRemoteThread'ing
+        // directly into KoptRequestUnload's address inside the target's
+        // copy of kopt_payload.dll. That used to work but was found to
+        // reliably hang (5s timeout, every time, on an otherwise perfectly
+        // alive/responsive target process) after a session had already
+        // gone through a few inject/unload cycles under Proton/Wine --
+        // CreateRemoteThread landing on an arbitrary address inside a
+        // third-party, non-builtin PE module is a far less exercised Wine
+        // code path than landing on a builtin export (kernel32!LoadLibraryW,
+        // used by inject() above, which never showed this problem).
+        // CreateEventW/SetEvent are exactly as "builtin" as LoadLibraryW.
+        const std::wstring event_name = L"Kopt_Unload_" + std::to_wstring(pid);
+        Handle event(OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name.c_str()));
+        if (!event)
         {
-            error = L"Could not map the loaded payload for export lookup (error " +
-                std::to_wstring(GetLastError()) + L")";
+            error = L"OpenEventW failed (error " + std::to_wstring(GetLastError()) +
+                L") -- loaded payload may predate the named-event unload path";
             return false;
         }
-        const FARPROC local_request = GetProcAddress(local_image, "KoptRequestUnload");
-        if (local_request == nullptr)
+        if (SetEvent(event.value) == FALSE)
         {
-            FreeLibrary(local_image);
-            error = L"Loaded payload has no KoptRequestUnload export";
-            return false;
-        }
-        const auto request_rva = reinterpret_cast<std::uintptr_t>(local_request) -
-            reinterpret_cast<std::uintptr_t>(local_image);
-        FreeLibrary(local_image);
-        Handle thread(CreateRemoteThread(process.value, nullptr, 0,
-            reinterpret_cast<LPTHREAD_START_ROUTINE>(loaded->base + request_rva), nullptr, 0, nullptr));
-        if (!thread)
-        {
-            error = L"CreateRemoteThread(unload) failed (error " + std::to_wstring(GetLastError()) + L")";
-            return false;
-        }
-        if (WaitForSingleObject(thread.value, 5000) != WAIT_OBJECT_0)
-        {
-            error = L"KoptRequestUnload call timed out";
+            error = L"SetEvent failed (error " + std::to_wstring(GetLastError()) + L")";
             return false;
         }
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);

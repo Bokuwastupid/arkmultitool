@@ -26,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 using kopt::ComPtr;
 
@@ -93,6 +94,7 @@ namespace
     IDXGISwapChain* g_game_swap_chain{};
     WNDPROC g_original_wndproc{};
     std::atomic<bool> g_stop{};
+    HANDLE g_unload_event{};
     std::atomic<unsigned> g_active_callbacks{};
     std::chrono::steady_clock::time_point g_last_frame{};
     std::atomic<bool> g_first_present_logged{};
@@ -130,6 +132,7 @@ namespace
     bool g_chams_rasterizer_valid{};
     std::uint32_t g_uploaded_chams_color{};
     PVOID g_exception_guard_handle{};
+    PVOID g_fatal_exception_logger_handle{};
     LPTOP_LEVEL_EXCEPTION_FILTER g_previous_exception_filter{};
     std::uintptr_t g_game_module_base{};
     alignas(8) std::uint64_t g_none_fname{};
@@ -237,6 +240,83 @@ namespace
         if (g_previous_exception_filter != nullptr &&
             g_previous_exception_filter != &unhandled_exception_filter)
             return g_previous_exception_filter(exception);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // fatal_exception_logger is a diagnostic tripwire, not a handler: it
+    // NEVER swallows anything (always returns EXCEPTION_CONTINUE_SEARCH),
+    // it only appends one log_line before whatever normally happens next
+    // happens anyway. Why this exists as a SEPARATE mechanism from
+    // unhandled_exception_filter below: a real crash on 2026-09-02 left no
+    // diagnostics/crash-* bundle at all -- kopt_internal.log just stops
+    // mid-session with no exception ever reaching that top-level filter.
+    // SetUnhandledExceptionFilter is a LAST-RESORT callback: Windows (and
+    // Wine's translation of a SIGSEGV into an SEH exception) only invokes
+    // it if nothing earlier in the frame-based __try/__except chain
+    // handled the exception AND the process isn't torn down through some
+    // other path (TerminateProcess, __fastfail, a raw signal Wine's
+    // page-fault translator failed to convert at all). A vectored handler
+    // registered here runs BEFORE any frame-based handler gets a chance to
+    // swallow or misreport the exception, so if the same crash happens
+    // again, comparing this line's timestamp/code against whether a
+    // diagnostics/crash-* bundle showed up afterward tells us which of
+    // those two things actually happened -- currently indistinguishable
+    // from kopt_internal.log alone.
+    std::mutex g_fatal_logger_mutex;
+    std::unordered_set<std::uintptr_t> g_logged_fatal_addresses;
+    // Caps memory AND (far more importantly) bounds how many times this can
+    // ever call log_line's synchronous open+write+close -- see the note
+    // below on why an unbounded version of this handler is a real, once-
+    // observed-in-practice perf bug, not a hypothetical.
+    constexpr std::size_t kMaxLoggedFatalAddresses = 256;
+
+    LONG CALLBACK fatal_exception_logger(EXCEPTION_POINTERS* exception)
+    {
+        if (exception == nullptr || exception->ExceptionRecord == nullptr)
+            return EXCEPTION_CONTINUE_SEARCH;
+        const DWORD code = exception->ExceptionRecord->ExceptionCode;
+        // Only the codes that mean "this thread is not going to recover
+        // normally" -- C++ throw/catch, .NET-style, and Wine's own
+        // internal bookkeeping exceptions (e.g. thread naming, debugger
+        // probes) raise plenty of harmless first-chance exceptions that
+        // would make this log unreadable if logged unconditionally.
+        switch (code)
+        {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_PRIV_INSTRUCTION:
+        case EXCEPTION_STACK_OVERFLOW:
+        case EXCEPTION_IN_PAGE_ERROR:
+        case EXCEPTION_DATATYPE_MISALIGNMENT:
+            break;
+        default:
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        const auto address = reinterpret_cast<std::uintptr_t>(exception->ExceptionRecord->ExceptionAddress);
+        // Log each distinct fault ADDRESS once, not every occurrence.
+        // Discovered the hard way: some other, unrelated first-chance
+        // ACCESS_VIOLATION-and-recover pattern elsewhere in ShooterGame/its
+        // D3D driver fires routinely (not the one specific, already-handled
+        // flight-death montage bug -- game_exception_guard resolves that
+        // one via EXCEPTION_CONTINUE_EXECUTION before dispatch even reaches
+        // this handler, since it's registered later and VEH's "first" list
+        // is LIFO). Logging unconditionally meant a synchronous
+        // open+append+close file write on every single occurrence -- if
+        // that fires many times per frame, THIS diagnostic tool was the
+        // periodic multi-second stutter, not the crash it exists to catch.
+        {
+            const std::lock_guard<std::mutex> lock(g_fatal_logger_mutex);
+            if (g_logged_fatal_addresses.size() >= kMaxLoggedFatalAddresses ||
+                !g_logged_fatal_addresses.insert(address).second)
+                return EXCEPTION_CONTINUE_SEARCH;
+        }
+        const auto offset = g_game_module_base != 0 && address >= g_game_module_base ?
+            address - g_game_module_base : 0;
+        log_line(std::format(
+            L"FATAL SEH FIRST-CHANCE code=0x{:08X} address=0x{:016X} game_module_offset=0x{:X} "
+            L"(if the process dies without a diagnostics/crash-* folder appearing after this line, "
+            L"the crash bypassed SetUnhandledExceptionFilter entirely -- see PROTON_LOG launch option)",
+            code, address, offset));
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -1269,6 +1349,31 @@ namespace
         g_settings_path = directory / L"kopt_internal.ini";
         g_log_path = directory / L"kopt_internal.log";
         log_line(L"Payload worker started");
+        // Named per-PID so kopt_injector.exe's --unload can find it without
+        // already knowing kopt_payload.dll's remote base address. This
+        // REPLACES an earlier CreateRemoteThread-into-KoptRequestUnload's-
+        // own-address design: that worked for the very first injection of a
+        // session but was found to reliably time out (5s, every time) on a
+        // long-running Wine/Proton session that had already gone through a
+        // few inject/unload cycles -- CreateRemoteThread's raw start-address
+        // form is the well-worn, heavily-exercised path when the target is
+        // a builtin export (kernel32!LoadLibraryW, used by inject() above,
+        // which never showed this problem); jumping directly into an
+        // arbitrary address inside a third-party, non-builtin PE module is
+        // a far less exercised corner of Wine's thread creation, and this
+        // symptom (silent hang, not a crash, not a wrong-result) matches
+        // that being the less reliable path rather than a bug in
+        // KoptRequestUnload's own two-instruction body. A named event is
+        // the standard, boring, universally-supported way to signal into a
+        // process without running code at an address the caller had to
+        // guess at cross-process -- kernel32's CreateEvent/SetEvent are
+        // exactly as "builtin" as LoadLibraryW itself.
+        g_unload_event = CreateEventW(nullptr, TRUE, FALSE,
+            (L"Kopt_Unload_" + std::to_wstring(GetCurrentProcessId())).c_str());
+        // Registered before everything else, including
+        // SetUnhandledExceptionFilter below -- see fatal_exception_logger's
+        // doc comment for why this exists as a second, earlier tripwire.
+        g_fatal_exception_logger_handle = AddVectoredExceptionHandler(1, fatal_exception_logger);
         g_previous_exception_filter = SetUnhandledExceptionFilter(&unhandled_exception_filter);
         g_settings.load(g_settings_path);
         install_game_exception_guard();
@@ -1280,6 +1385,9 @@ namespace
             // ever got this far -- not an error, just an early exit.
             log_line(L"Unload requested before render was ready; skipping hook install");
             remove_game_exception_guard();
+            RemoveVectoredExceptionHandler(g_fatal_exception_logger_handle);
+            SetUnhandledExceptionFilter(g_previous_exception_filter);
+            if (g_unload_event != nullptr) CloseHandle(g_unload_event);
             CoUninitialize();
             FreeLibraryAndExitThread(g_module, 0);
         }
@@ -1288,12 +1396,23 @@ namespace
             log_line(L"DXGI hook installation failed; unloading payload");
             MessageBoxW(nullptr, L"DXGI hook installation failed.", L"KOPT Internal", MB_ICONERROR | MB_OK);
             remove_game_exception_guard();
+            RemoveVectoredExceptionHandler(g_fatal_exception_logger_handle);
             SetUnhandledExceptionFilter(g_previous_exception_filter);
+            if (g_unload_event != nullptr) CloseHandle(g_unload_event);
             CoUninitialize();
             FreeLibraryAndExitThread(g_module, 1);
         }
         log_line(L"DXGI hooks installed; waiting for Present");
-        while (!g_stop.load()) Sleep(50);
+        while (!g_stop.load())
+        {
+            // g_unload_event may be null if CreateEventW failed (extremely
+            // unlikely) -- fall back to the plain poll so END/panic-hotkey
+            // local sets of g_stop still work even without it.
+            if (g_unload_event != nullptr && WaitForSingleObject(g_unload_event, 50) == WAIT_OBJECT_0)
+                g_stop.store(true);
+            else if (g_unload_event == nullptr)
+                Sleep(50);
+        }
         for (int attempt = 0; attempt < 25 && g_camera_slot != nullptr &&
             !g_unload_cleanup_completed.load(std::memory_order_acquire); ++attempt) Sleep(10);
         uninstall_hooks();
@@ -1301,7 +1420,9 @@ namespace
         g_publisher->stop();
         g_runtime.restore_transient_state();
         remove_game_exception_guard();
+        RemoveVectoredExceptionHandler(g_fatal_exception_logger_handle);
         SetUnhandledExceptionFilter(g_previous_exception_filter);
+        if (g_unload_event != nullptr) CloseHandle(g_unload_event);
         g_settings.save(g_settings_path);
         CoUninitialize();
         FreeLibraryAndExitThread(g_module, 0);
