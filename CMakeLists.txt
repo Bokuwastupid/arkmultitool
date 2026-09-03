@@ -166,16 +166,18 @@ endforeach()
 target_link_libraries(kopt_quic_test PRIVATE ws2_32 bcrypt)
 
 if(MSVC)
-    set_property(TARGET kopt_payload kopt_injector kopt_version_proxy kopt_share_selftest kopt_quic_test PROPERTY
+    set_property(TARGET kopt_payload kopt_injector kopt_quick_injector kopt_version_proxy kopt_share_selftest kopt_quic_test PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     target_compile_options(kopt_payload PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_injector PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_compile_options(kopt_quick_injector PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_version_proxy PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_share_selftest PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_quic_test PRIVATE /W4 /permissive- /EHsc /utf-8)
 else()
     target_compile_options(kopt_payload PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_injector PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(kopt_quick_injector PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_version_proxy PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_share_selftest PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_quic_test PRIVATE -Wall -Wextra -Wpedantic)
@@ -192,12 +194,13 @@ else()
     # for every mingw-w64 distro packaging, not just nixpkgs'.
     target_link_options(kopt_payload PRIVATE -static)
     target_link_options(kopt_injector PRIVATE -static -municode)
+    target_link_options(kopt_quick_injector PRIVATE -static -municode)
     target_link_options(kopt_version_proxy PRIVATE -static)
     target_link_options(kopt_share_selftest PRIVATE -static)
     target_link_options(kopt_quic_test PRIVATE -static)
 endif()
 
-foreach(target kopt_payload kopt_injector kopt_version_proxy kopt_share_selftest kopt_quic_test)
+foreach(target kopt_payload kopt_injector kopt_quick_injector kopt_version_proxy kopt_share_selftest kopt_quic_test)
     set_target_properties(${target} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dist"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dist"
