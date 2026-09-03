@@ -6,12 +6,15 @@
 // lives inside an injected DLL in someone else's process.
 //
 // Second use (argv[1] == "broadcast"): connects as a SECOND client into the
-// SAME (group_id, server_ip) room as a real, already-connected game client
-// and submits one fake Sighting, to exercise the receive side end-to-end --
-// ark_relay should broadcast it to every OTHER client in that room, and the
-// live game's on_remote_batch (payload.cpp) should pick it up. Token/group/
-// server_ip come from argv so this stays in sync with whatever the live
-// test session is actually using, instead of a second hardcoded copy.
+// SAME (active_group, server_ip) room as a real, already-connected game
+// client and submits one fake Sighting, to exercise the receive side
+// end-to-end -- ark_relay should broadcast it to every OTHER client in
+// that room, and the live game's on_remote_batch (payload.cpp) should
+// pick it up. "Same room" now means "same account's active_group_id" --
+// pass a token for an account whose active group matches the live
+// session's, there's no group_id argument to line up separately anymore.
+// Token/server_ip come from argv so this stays in sync with whatever the
+// live test session is actually using, instead of a hardcoded copy.
 #include "kopt/http3_publisher.hpp"
 #include "kopt/share.hpp"
 
@@ -38,14 +41,13 @@ int main(int argc, char** argv)
 {
     const bool broadcast_mode = argc > 1 && std::string(argv[1]) == "broadcast";
     const std::wstring token = argc > 2 ? to_wide(argv[2]) : L"quic-test-token";
-    const std::wstring group_id = argc > 3 ? to_wide(argv[3]) : L"e2e-test-group-http3";
-    const std::wstring server_ip = argc > 4 ? to_wide(argv[4]) : L"10.99.0.1:7777";
+    const std::wstring server_ip = argc > 3 ? to_wide(argv[3]) : L"10.99.0.1:7777";
 
     std::puts("quic_test: starting Http3Publisher");
     std::fflush(stdout);
 
     kopt::Http3Publisher publisher;
-    publisher.start(L"127.0.0.1:8443", token, group_id, server_ip);
+    publisher.start(L"127.0.0.1:8443", token, server_ip);
 
     std::puts("quic_test: start() returned, waiting for handshake");
     std::fflush(stdout);
@@ -61,9 +63,9 @@ int main(int argc, char** argv)
         fake.label = L"QuicTestBroadcast";
         fake.class_name = L"Rex_Character_BP_C";
         fake.team = 999;
-        fake.x = argc > 5 ? std::stof(argv[5]) : 12345.0F;
-        fake.y = argc > 6 ? std::stof(argv[6]) : 6789.0F;
-        fake.z = argc > 7 ? std::stof(argv[7]) : 100.0F;
+        fake.x = argc > 4 ? std::stof(argv[4]) : 12345.0F;
+        fake.y = argc > 5 ? std::stof(argv[5]) : 6789.0F;
+        fake.z = argc > 6 ? std::stof(argv[6]) : 100.0F;
         fake.health = 500.0F;
         fake.max_health = 500.0F;
         fake.has_health = true;

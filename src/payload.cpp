@@ -99,8 +99,8 @@ namespace
     // Whether g_publisher->start() has actually been called (not just
     // whether the user wants share on) -- lets the start attempt keep
     // quietly retrying, tick after tick, while share_enabled is true but
-    // GroupId/server_ip aren't resolved yet (loading screen/main menu),
-    // without re-triggering on every single frame once it succeeds.
+    // server_ip isn't resolved yet (loading screen/main menu), without
+    // re-triggering on every single frame once it succeeds.
     bool g_share_started{};
     bool g_share_missing_token_logged{};
     bool g_share_missing_server_ip_logged{};
@@ -1178,7 +1178,7 @@ namespace
                     // the publisher started with the ini's placeholder
                     // 10.99.0.1:7777 instead of the real, freshly-resolved
                     // server address.
-                    else if (!snapshot.local_valid || g_settings.share_group_id.empty())
+                    else if (!snapshot.local_valid)
                     {
                         // Normal transient state during the loading screen/
                         // main menu -- deliberately silent (no log_line
@@ -1210,8 +1210,7 @@ namespace
                             snapshot.remote_server_ip : g_settings.share_server_ip;
                         log_line(std::format(L"Starting share publisher: {} (server={})",
                             effective_endpoint, effective_server_ip));
-                        g_publisher->start(effective_endpoint, effective_token,
-                            g_settings.share_group_id, effective_server_ip);
+                        g_publisher->start(effective_endpoint, effective_token, effective_server_ip);
                         g_publisher->subscribe(on_remote_batch);
                         g_share_started = true;
                     }
