@@ -13,6 +13,15 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/deps.sh
 source "${root_dir}/scripts/lib/deps.sh"
 
+# .env.sh -- local, not in git (.gitignore: .env.*); sets KOPT_RELAY_DEFAULT
+# to a real relay address for local dev builds so it never has to be typed
+# by hand or hardcoded into a tracked file (see .env.sh.example, and
+# CMakeLists.txt's own comment on KOPT_RELAY_DEFAULT for why this matters).
+if [[ -f "${root_dir}/.env.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${root_dir}/.env.sh"
+fi
+
 configuration="Release"
 do_install=0
 while [[ $# -gt 0 ]]; do
@@ -64,12 +73,18 @@ if [[ -n "$mcfg_runtime_dir" ]]; then
   extra_linker_flags="-L${mcfg_runtime_dir}/lib"
 fi
 
+relay_default_args=()
+if [[ -n "${KOPT_RELAY_DEFAULT:-}" ]]; then
+  relay_default_args=(-DKOPT_RELAY_DEFAULT="${KOPT_RELAY_DEFAULT}")
+fi
+
 cmake -S "${root_dir}" -B "${build_dir}" -G Ninja \
   -DCMAKE_BUILD_TYPE="${configuration}" \
   -DCMAKE_TOOLCHAIN_FILE="${root_dir}/cmake/mingw64-toolchain.cmake" \
   -DCMAKE_CXX_FLAGS="${extra_cxx_flags}" \
   -DCMAKE_EXE_LINKER_FLAGS="${extra_linker_flags}" \
-  -DCMAKE_SHARED_LINKER_FLAGS="${extra_linker_flags}"
+  -DCMAKE_SHARED_LINKER_FLAGS="${extra_linker_flags}" \
+  "${relay_default_args[@]}"
 cmake --build "${build_dir}" --parallel
 
 echo "Built PE64 artifacts in ${build_dir}/dist"
