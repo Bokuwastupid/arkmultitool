@@ -40,6 +40,12 @@ Install Visual Studio C++ Build Tools and run:
 
 The build performs a PE64 self-test. Output is in `build-msvc\dist`.
 
+For the standalone password-free path, open `build-msvc\dist\quick-inject` and
+double-click `KOPT_Inject.exe`. Keep `kopt_payload.dll` beside it. The GUI finds
+`ShooterGame.exe`, offers Retry when ARK is not running, requests UAC only when
+the game requires matching privileges, and reports whether injection succeeded
+or the payload was already loaded. It does not contact the loader or backend.
+
 Start ARK without BattlEye, enter a map, then run:
 
 ```powershell
