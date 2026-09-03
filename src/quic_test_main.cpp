@@ -86,7 +86,7 @@ int main(int argc, char** argv)
         fake.health = 500.0F;
         fake.max_health = 500.0F;
         fake.has_health = true;
-        publisher.submit_sightings({fake}, {});
+        publisher.submit_sightings({fake}, {}, 0, kopt::Vec3{});
     }
 
     std::puts("quic_test: sleeping 4s");

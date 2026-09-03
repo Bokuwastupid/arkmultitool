@@ -24,7 +24,7 @@ namespace kopt::share
 
     void RemoteView::update(RemoteBatch batch)
     {
-        const std::uint64_t key = batch.reporter_stable_id;
+        const std::string key = batch.reporter_account_id;
         by_reporter_[key] = std::move(batch);
     }
 

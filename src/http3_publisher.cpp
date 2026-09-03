@@ -215,17 +215,30 @@ namespace kopt
                 j["max_health"] = s.max_health;
             }
             if (s.kind == share::Kind::turret && s.turret) j["turret"] = turret_json(*s.turret);
+            // stable_id -- linked_player_data_id, only meaningful for
+            // Kind::player (Sighting::stable_id's own doc comment: 0 for
+            // dino/structure/turret, no such id exists for those). Feeds
+            // protocol.Entity.StableID -> streamproducer.PlayerFields'
+            // platform_id on the Go side (see its own doc comment for why
+            // this, not a real Steam/platform id, is what's available).
+            if (s.kind == share::Kind::player && s.stable_id != 0) j["stable_id"] = s.stable_id;
             return j;
         }
 
         // protocol.Inbound{Type:"sighting", Seq, ReporterCharacterID,
-        // Vanished, Entities}. ReporterCharacterID is left empty -- this
-        // client has no stable in-game character id to offer (see
-        // kopt::share::Sighting::stable_id's own doc comment: it is the
-        // *target's* id, not the reporter's), and the field is optional on
-        // the wire.
+        // ReporterX/Y/Z, Vanished, Entities}. ReporterCharacterID/position
+        // are this client's own identity (ArkRuntime::Snapshot::
+        // local_stable_id -- the ARK linked_player_data_id, already used
+        // as kopt::share::Sighting::stable_id for player *targets*, same
+        // value, different role here: identifying the reporter, not a
+        // sighted actor) and position at submission time, sent whenever
+        // known (reporter_stable_id != 0) so the receiving side's
+        // ReporterFilter (share_remote.hpp) can actually dedup a batch
+        // from a teammate already in view range instead of always seeing
+        // zeros.
         std::string build_sighting_frame(std::uint64_t seq, const std::vector<share::Sighting>& batch,
-            const std::vector<std::wstring>& vanished)
+            const std::vector<std::wstring>& vanished,
+            std::uint64_t reporter_stable_id, const Vec3& reporter_position)
         {
             json entities = json::array();
             for (const auto& sighting : batch) entities.push_back(entity_json(sighting));
@@ -235,6 +248,13 @@ namespace kopt
             json message;
             message["type"] = "sighting";
             message["seq"] = seq;
+            if (reporter_stable_id != 0)
+            {
+                message["reporter_character_id"] = std::to_string(reporter_stable_id);
+                message["reporter_x"] = reporter_position.x;
+                message["reporter_y"] = reporter_position.y;
+                message["reporter_z"] = reporter_position.z;
+            }
             message["entities"] = std::move(entities);
             if (!vanished_json.empty()) message["vanished"] = std::move(vanished_json);
             return message.dump();
@@ -262,17 +282,26 @@ namespace kopt
             return share::Kind::other;
         }
 
-        // protocol.Outbound{Type, ReportedBy, RelayedAt, Entities} ->
-        // kopt::share::RemoteBatch. ReportedBy on the wire is the
-        // account_id string (see hub/client.go's handleSighting) -- this
-        // client has no numeric mapping for a remote account_id vs. the
-        // in-game linked_player_data_id ReporterFilter compares against
-        // (share_remote.hpp's own doc comment: "репортёр всегда игрок с
-        // настоящим игровым id"), so reporter_stable_id/reporter_position
-        // are left at zero here. This means ReporterFilter::accept never
-        // matches "it's me" or "someone in my own view radius" for
-        // QUIC-received batches specifically -- a known coarseness, not
-        // silently pretending to have data this transport doesn't carry.
+        // protocol.Outbound{Type, ReportedBy, ReporterCharacterID,
+        // ReporterX/Y/Z, RelayedAt, Entities} -> kopt::share::RemoteBatch.
+        // reporter_character_id is the sender's own linked_player_data_id,
+        // stringified (see build_sighting_frame's doc comment on the send
+        // side) -- parsed back into reporter_stable_id/reporter_position
+        // below so ReporterFilter::accept (share_remote.hpp) can actually
+        // dedup a batch from a teammate already in view range. A missing
+        // or malformed value degrades to 0/zero-position ("unknown"), same
+        // permissive handling as every other optional field parsed here --
+        // never drops the whole batch over it.
+        //
+        // reporter_account_id (below) is a separate concern from
+        // reporter_stable_id: RemoteView keys its per-reporter map on it
+        // (see its own doc comment) because reporter_stable_id can
+        // legitimately be 0 (old client, or !local_valid at submission
+        // time) -- without a stable non-identity key, two teammates
+        // sharing at once would collide into the same map slot and
+        // silently evict each other, live symptom "some teammates'
+        // sightings never show, no pattern to it" regardless of ESP/radius
+        // settings on either end. Keep both fields, don't conflate them.
         bool parse_broadcast(const std::string& payload, share::RemoteBatch& out)
         {
             json message;
@@ -287,6 +316,27 @@ namespace kopt
             if (!message.is_object() || message.value("type", "") != "sighting") return false;
 
             out = share::RemoteBatch{};
+            // protocol.Outbound.ReportedBy on the wire (backend_go/internal/
+            // hub/client.go's handleSighting sets it to c.AccountID before
+            // broadcasting) -- see RemoteBatch::reporter_account_id's own
+            // doc comment for why RemoteView needs this to not collide
+            // different reporters into the same map slot.
+            out.reporter_account_id = message.value("reported_by", std::string{});
+            const std::string reporter_character_id = message.value("reporter_character_id", std::string{});
+            if (!reporter_character_id.empty())
+            {
+                try
+                {
+                    out.reporter_stable_id = std::stoull(reporter_character_id);
+                }
+                catch (const std::exception&)
+                {
+                    out.reporter_stable_id = 0; // malformed -- degrade to "unknown", don't drop the batch
+                }
+            }
+            out.reporter_position.x = message.value("reporter_x", 0.0F);
+            out.reporter_position.y = message.value("reporter_y", 0.0F);
+            out.reporter_position.z = message.value("reporter_z", 0.0F);
             for (const auto& entity : message.value("entities", json::array()))
             {
                 share::Sighting s;
@@ -1006,12 +1056,13 @@ namespace kopt
         if (impl_->worker.joinable()) impl_->worker.join();
     }
 
-    void Http3Publisher::submit_sightings(std::vector<share::Sighting> batch, std::vector<std::wstring> vanished)
+    void Http3Publisher::submit_sightings(std::vector<share::Sighting> batch, std::vector<std::wstring> vanished,
+        std::uint64_t reporter_stable_id, Vec3 reporter_position)
     {
         if (!impl_->connected_flag.load(std::memory_order_acquire)) return;
         if (batch.empty() && vanished.empty()) return;
         const std::uint64_t seq = impl_->seq.fetch_add(1, std::memory_order_relaxed) + 1;
-        impl_->queue_frame(build_sighting_frame(seq, batch, vanished));
+        impl_->queue_frame(build_sighting_frame(seq, batch, vanished, reporter_stable_id, reporter_position));
     }
 
     void Http3Publisher::submit_notifications(std::vector<share::Notification>)

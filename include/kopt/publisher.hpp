@@ -46,8 +46,18 @@ namespace kopt
         // вызова (share::ChangeFilter::collect_vanished) -- едут в теле
         // того же запроса, что и sightings (см. JSON-контракт), поэтому
         // отдельного метода для них нет.
+        // reporter_stable_id/reporter_position -- this client's own
+        // identity/position at submission time (ArkRuntime::Snapshot's
+        // local_stable_id/local_position), independent of
+        // Settings::share_send_self_position (that flag only controls
+        // whether the reporter's own actor is added to the entities batch
+        // as a visible sighting -- these two params are dedup metadata,
+        // sent every call regardless). 0/default means "unknown" (e.g.
+        // !local_valid at call time) -- implementations must degrade
+        // gracefully, never fabricate a position.
         virtual void submit_sightings(std::vector<share::Sighting> batch,
-            std::vector<std::wstring> vanished) = 0;
+            std::vector<std::wstring> vanished,
+            std::uint64_t reporter_stable_id, Vec3 reporter_position) = 0;
         virtual void submit_notifications(std::vector<share::Notification> batch) = 0;
 
         // Приёмная сторона -- колбэк вызывается на фоновом read-потоке для
@@ -65,7 +75,8 @@ namespace kopt
     public:
         void start(std::wstring, std::wstring, std::wstring) override {}
         void stop() override {}
-        void submit_sightings(std::vector<share::Sighting>, std::vector<std::wstring>) override {}
+        void submit_sightings(std::vector<share::Sighting>, std::vector<std::wstring>,
+            std::uint64_t, Vec3) override {}
         void submit_notifications(std::vector<share::Notification>) override {}
         void subscribe(std::function<void(share::RemoteBatch)>) override {}
         [[nodiscard]] bool connected() const noexcept override { return false; }

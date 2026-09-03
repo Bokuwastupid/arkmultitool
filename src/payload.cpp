@@ -1249,9 +1249,20 @@ namespace
                         if (const auto self = kopt::share::build_self_sighting(snapshot))
                             all_sightings.push_back(*self);
                     }
+                    // reporter identity/position -- independent axis from
+                    // share_send_self_position above (that one only gates
+                    // whether self appears as a drawable entity in this
+                    // same batch): dedup metadata for the receiving side's
+                    // ReporterFilter, sent whenever known regardless of
+                    // that setting. snapshot.local_stable_id/local_position
+                    // are already "sticky" (see their own doc comments in
+                    // runtime.hpp) -- a momentary !local_valid here just
+                    // means submit_sightings gets the last-known values,
+                    // not zeros, consistent with that documented behavior.
                     g_publisher->submit_sightings(
                         g_share_filter.filter(all_sightings, now),
-                        g_share_filter.collect_vanished(all_sightings));
+                        g_share_filter.collect_vanished(all_sightings),
+                        snapshot.local_stable_id, snapshot.local_position);
                     if (!snapshot.alerts.empty())
                     {
                         std::vector<kopt::share::Notification> notifications;

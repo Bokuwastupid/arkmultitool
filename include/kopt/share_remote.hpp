@@ -25,13 +25,24 @@ namespace kopt::share
     // Целиком то, что прислал один репортёр за один раз.
     struct RemoteBatch
     {
-        // Игровой account-id репортёра (linked_player_data_id) -- числом,
-        // не строкой: это тот же тип, что ReporterFilter::accept сравнивает
-        // с own_stable_id, и превращать его в wstring и обратно только ради
-        // хранения означало бы платить за конверсию и ловить ошибку разбора
-        // там, где её в принципе не может быть.
+        // Числовой игровой id репортёра (linked_player_data_id) и его
+        // позиция на момент отправки батча -- protocol.Outbound
+        // (backend_go/internal/protocol/message.go) несёт их как
+        // reporter_character_id/reporter_x/y/z, парсится в
+        // Http3Publisher::parse_broadcast. Может быть 0/{} для старого
+        // клиента или если у отправителя !local_valid в момент отправки
+        // (см. Publisher::submit_sightings's own doc comment) -- ReporterFilter
+        // ниже уже написан и протестирован под эти значения.
         std::uint64_t reporter_stable_id{};
         Vec3 reporter_position{};
+        // reported_by с провода -- единственное реально приходящее поле,
+        // однозначно отличающее одного репортёра от другого. RemoteView
+        // ключует по нему (см. его собственный комментарий): раньше
+        // ключевание шло по reporter_stable_id, который всегда 0 для любого
+        // отправителя -- батчи разных тиммейтов стирали друг друга в одной
+        // и той же ячейке карты, и на экране в любой момент оставался
+        // только тот, чей батч пришёл по сети последним.
+        std::string reporter_account_id;
         std::vector<Sighting> sightings;
         std::vector<Notification> notifications;
         std::vector<std::wstring> vanished;
@@ -82,7 +93,11 @@ namespace kopt::share
             std::chrono::steady_clock::time_point now);
 
     private:
-        std::unordered_map<std::uint64_t, RemoteBatch> by_reporter_;
+        // Ключ -- reporter_account_id (см. RemoteBatch's own doc comment),
+        // не reporter_stable_id: последний всегда 0 для любого отправителя
+        // (протокол не переносит игровой id), так что ключевание по нему
+        // сводило бы всех репортёров в одну ячейку.
+        std::unordered_map<std::string, RemoteBatch> by_reporter_;
         std::chrono::milliseconds ttl_;
     };
 }

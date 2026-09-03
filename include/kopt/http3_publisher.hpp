@@ -37,7 +37,8 @@ namespace kopt
         void start(std::wstring endpoint, std::wstring token, std::wstring server_ip) override;
         void stop() override;
         void submit_sightings(std::vector<share::Sighting> batch,
-            std::vector<std::wstring> vanished) override;
+            std::vector<std::wstring> vanished,
+            std::uint64_t reporter_stable_id, Vec3 reporter_position) override;
         void submit_notifications(std::vector<share::Notification> batch) override;
         void subscribe(std::function<void(share::RemoteBatch)> on_batch) override;
         [[nodiscard]] bool connected() const noexcept override;
