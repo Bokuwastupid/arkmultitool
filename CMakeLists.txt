@@ -12,6 +12,19 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Default relay address baked into kopt_payload (see its own
+# target_compile_definitions and config.hpp's KOPT_DEFAULT_SHARE_ENDPOINT
+# comment) -- override with -DKOPT_RELAY_DEFAULT=host:port at configure
+# time. Still just a default: kopt_internal.ini's [Share] Endpoint and
+# kopt_injector.exe's --backend both win over it at runtime.
+#
+# Placeholder on purpose -- not the real relay address. That value is
+# infra, not source: it lives in the gitignored .env.sh
+# (scripts/build-linux.sh sources it if present, see .env.sh.example) or
+# gets passed ad hoc via -DKOPT_RELAY_DEFAULT=... A real IP baked into a
+# tracked file would ship with every clone/fork of this repo.
+set(KOPT_RELAY_DEFAULT "127.0.0.1:8443" CACHE STRING "Default kopt_payload relay address (host:port), overridable via ini/--backend at runtime")
+
 add_library(kopt_payload SHARED
     src/config.cpp
     src/overlay.cpp
@@ -29,6 +42,11 @@ target_compile_definitions(kopt_payload PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
     KOPT_PAYLOAD_EXPORTS
+    # Default relay address baked into this build -- kopt_internal.ini's
+    # [Share] Endpoint and --backend still override it at runtime (see
+    # config.hpp's own comment on KOPT_DEFAULT_SHARE_ENDPOINT). Override
+    # per invocation with: cmake ... -DKOPT_RELAY_DEFAULT=host:port
+    KOPT_DEFAULT_SHARE_ENDPOINT="${KOPT_RELAY_DEFAULT}"
 )
 target_link_libraries(kopt_payload PRIVATE d3d11 d3dcompiler dxgi gdi32 user32 winmm dbghelp)
 
