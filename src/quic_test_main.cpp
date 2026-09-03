@@ -15,6 +15,10 @@
 // session's, there's no group_id argument to line up separately anymore.
 // Token/server_ip come from argv so this stays in sync with whatever the
 // live test session is actually using, instead of a hardcoded copy.
+// Relay address comes from KOPT_QUIC_TEST_BACKEND env var (host:port),
+// defaulting to 127.0.0.1:8443 -- not hardcoded, and separate from
+// payload.cpp's KOPT_DEFAULT_SHARE_ENDPOINT/--backend (this binary runs
+// standalone, not injected, so a plain env var reaches it fine).
 #include "kopt/http3_publisher.hpp"
 #include "kopt/share.hpp"
 
@@ -22,6 +26,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,6 +40,17 @@ namespace
         if (len > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out.data(), len);
         return out;
     }
+
+    // Плоский процесс, запускается напрямую из терминала (не инжектится) --
+    // в отличие от payload.cpp, реальные переменные окружения сюда доходят
+    // без проблем, никакого shared-memory моста не нужно.
+    std::wstring backend_from_env()
+    {
+        wchar_t buf[256];
+        const DWORD len = GetEnvironmentVariableW(L"KOPT_QUIC_TEST_BACKEND", buf, static_cast<DWORD>(std::size(buf)));
+        if (len == 0 || len >= std::size(buf)) return L"127.0.0.1:8443";
+        return std::wstring(buf, len);
+    }
 }
 
 int main(int argc, char** argv)
@@ -42,12 +58,13 @@ int main(int argc, char** argv)
     const bool broadcast_mode = argc > 1 && std::string(argv[1]) == "broadcast";
     const std::wstring token = argc > 2 ? to_wide(argv[2]) : L"quic-test-token";
     const std::wstring server_ip = argc > 3 ? to_wide(argv[3]) : L"10.99.0.1:7777";
+    const std::wstring backend = backend_from_env();
 
-    std::puts("quic_test: starting Http3Publisher");
+    std::printf("quic_test: starting Http3Publisher (backend=%ls)\n", backend.c_str());
     std::fflush(stdout);
 
     kopt::Http3Publisher publisher;
-    publisher.start(L"127.0.0.1:8443", token, server_ip);
+    publisher.start(backend, token, server_ip);
 
     std::puts("quic_test: start() returned, waiting for handshake");
     std::fflush(stdout);
