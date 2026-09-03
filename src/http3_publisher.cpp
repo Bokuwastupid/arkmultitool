@@ -20,6 +20,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -41,6 +42,30 @@ namespace kopt
         constexpr std::size_t kMaxFramePayload = 1 * 1024 * 1024; // generous vs. quicserver's maxBytes
         constexpr std::size_t kCidLen = 16;
         constexpr std::size_t kMaxUdpPayload = 1452; // conservative MTU-safe default, no PMTUD attempted
+
+        // hub.Client (backend_go, shared by the WS and QUIC transports)
+        // expects the CLIENT to be the one sending periodic app-level pings
+        // -- its own writePump sends one every RELAY_PING_INTERVAL (server
+        // default 30s) but that alone doesn't help: hub.Client's readPump
+        // resets ITS OWN liveness deadline (RELAY_PONG_WAIT, default 60s)
+        // only on something it RECEIVES, and this client never sent
+        // anything back during a quiet scene (no sightings to report).
+        // Confirmed live: a connection with zero outbound traffic died to
+        // ngtcp2's own idle-timeout right around the 60s pongWait mark,
+        // taking the whole publisher down with no reconnect (see the
+        // worker-loop comment on Http3Publisher::start). 20s keeps a
+        // comfortable margin under both the server's 30s ping cadence and
+        // its 60s liveness window, and resets on any real send (sightings
+        // count exactly like a ping server-side, see hub.Client.readPump),
+        // so this only actually fires during genuine silence.
+        constexpr auto kPingInterval = std::chrono::seconds(20);
+
+        std::string build_ping_frame()
+        {
+            json message;
+            message["type"] = "ping";
+            return message.dump();
+        }
 
         // --------------------------------------------------------------
         // Small self-contained helpers: this .cpp is the only place ngtcp2/
@@ -319,6 +344,12 @@ namespace kopt
         std::thread worker;
         std::atomic<bool> running{false};
         std::atomic<bool> connected_flag{false};
+        // running=false ends just the CURRENT connection attempt (set by
+        // run() itself on any error/close, or by stop() to cut an attempt
+        // short); stop_requested=true additionally tells the outer
+        // reconnect loop in start()'s worker lambda to give up for good
+        // instead of retrying with backoff. Only stop() ever sets this one.
+        std::atomic<bool> stop_requested{false};
 
         std::string host;
         std::string port_str;
@@ -355,6 +386,7 @@ namespace kopt
         std::string stream_send_buffer;
         std::string stream_recv_buffer;
         std::uint64_t recv_unacked_bytes{0};
+        std::chrono::steady_clock::time_point last_queued_at;
 
         ~Impl() { teardown(); }
 
@@ -368,6 +400,7 @@ namespace kopt
             framed[2] = static_cast<char>((len >> 8) & 0xFF);
             framed[3] = static_cast<char>(len & 0xFF);
             std::memcpy(framed.data() + 4, payload.data(), payload.size());
+            last_queued_at = std::chrono::steady_clock::now();
             const std::lock_guard<std::mutex> lock(out_mutex);
             out_queue.push_back(std::move(framed));
         }
@@ -730,6 +763,7 @@ namespace kopt
 
         log_line(std::format(L"share: connecting to {}:{}", to_wide(host), to_wide(port_str)));
         running.store(true, std::memory_order_release);
+        last_queued_at = std::chrono::steady_clock::now();
 
         std::uint8_t recv_buf[65536];
         while (running.load(std::memory_order_acquire))
@@ -811,6 +845,13 @@ namespace kopt
                 }
             }
 
+            // ---- keepalive: see kPingInterval's doc comment above ----
+            if (handshake_acked &&
+                std::chrono::steady_clock::now() - last_queued_at >= kPingInterval)
+            {
+                queue_frame(build_ping_frame());
+            }
+
             // ---- wait for the next incoming packet or the next timer ----
             const ngtcp2_tstamp expiry = ngtcp2_conn_get_expiry(conn);
             const ngtcp2_tstamp now = now_ts();
@@ -875,6 +916,7 @@ namespace kopt
     void Http3Publisher::start(std::wstring endpoint, std::wstring token, std::wstring server_ip)
     {
         stop(); // idempotent: tears down any previous connection first
+        impl_->stop_requested.store(false, std::memory_order_release);
 
         const std::string endpoint_utf8 = to_utf8(endpoint);
         const auto colon = endpoint_utf8.rfind(':');
@@ -898,26 +940,68 @@ namespace kopt
         // up. Every exception this code could plausibly throw (nlohmann::
         // json's parse/type errors, std::format_error, std::bad_alloc) is a
         // "this connection attempt failed" event, not a fatal one.
+        //
+        // Outer reconnect loop: run() returns on ANY disconnect (idle
+        // timeout, relay restart, transient network drop, stream close by
+        // the server, ...) -- confirmed live, a single dropped connection
+        // otherwise killed sharing for the rest of the game session with no
+        // way back short of --unload/reinject. Backoff starts at 1s,
+        // doubles, caps at 30s; resets to 1s once a connection survives
+        // long enough to have plausibly gone through a real handshake
+        // (kResetBackoffAfter), so one bad attempt doesn't inflate the
+        // wait for a connection that's otherwise healthy and just blipped.
         impl_->worker = std::thread([impl = impl_.get()]
         {
-            try
+            using namespace std::chrono;
+            constexpr auto kBaseBackoff = seconds(1);
+            constexpr auto kMaxBackoff = seconds(30);
+            constexpr auto kResetBackoffAfter = seconds(5);
+            auto backoff = kBaseBackoff;
+
+            while (!impl->stop_requested.load(std::memory_order_acquire))
             {
-                impl->run();
-            }
-            catch (const std::exception& e)
-            {
-                log_line(std::format(L"share: worker thread threw {}: {}",
-                    to_wide(typeid(e).name()), to_wide(e.what())));
-            }
-            catch (...)
-            {
-                log_line(L"share: worker thread threw a non-std::exception");
+                const auto attempt_started = steady_clock::now();
+                try
+                {
+                    impl->run();
+                }
+                catch (const std::exception& e)
+                {
+                    log_line(std::format(L"share: worker thread threw {}: {}",
+                        to_wide(typeid(e).name()), to_wide(e.what())));
+                }
+                catch (...)
+                {
+                    log_line(L"share: worker thread threw a non-std::exception");
+                }
+
+                if (impl->stop_requested.load(std::memory_order_acquire)) break;
+
+                backoff = (steady_clock::now() - attempt_started >= kResetBackoffAfter)
+                    ? kBaseBackoff
+                    : std::min(backoff * 2, kMaxBackoff);
+
+                log_line(std::format(L"share: connection lost, reconnecting in {}s",
+                    duration_cast<seconds>(backoff).count()));
+
+                // Slept in short slices, not one long sleep_for(backoff) --
+                // otherwise stop() (a live share_enabled=false toggle, or
+                // the game/menu unloading) would block for up to
+                // kMaxBackoff waiting on a join() of a thread that's just
+                // sleeping.
+                const auto wake_at = steady_clock::now() + backoff;
+                while (!impl->stop_requested.load(std::memory_order_acquire) &&
+                    steady_clock::now() < wake_at)
+                {
+                    std::this_thread::sleep_for(milliseconds(100));
+                }
             }
         });
     }
 
     void Http3Publisher::stop()
     {
+        impl_->stop_requested.store(true, std::memory_order_release);
         impl_->running.store(false, std::memory_order_release);
         if (impl_->worker.joinable()) impl_->worker.join();
     }
