@@ -2674,11 +2674,21 @@ namespace kopt
             text(share_connected_ ? L"Share: connected" : L"Share: offline",
                 {content_left + 2.0F, y, frame.right - 32.0F, y + 28.0F},
                 share_connected_ ? success : text_secondary, 12.0F);
-            y += 40.0F;
+            y += 22.0F;
+            text(L"Backend: " + (share_endpoint_display_.empty() ? L"(unknown)" : share_endpoint_display_),
+                {content_left + 2.0F, y, frame.right - 32.0F, y + 24.0F}, text_secondary, 11.0F);
+            y += 32.0F;
+            // 128 truncated a real RS256 JWT silently mid-paste -- header +
+            // claims + a 256-byte signature (~342 base64url chars alone)
+            // routinely runs 400-600+ chars; 4096 matches InputState::
+            // queue_paste's own clipboard cap so neither end truncates first.
             text_input(L"API key (sent in place of --share-token if none was injected)",
-                share_api_key_, 40, content_left, y, input, 128);
+                share_api_key_, 40, content_left, y, input, 4096);
+            if (button(L"Apply (reconnect with this key)",
+                {content_left, y, content_left + 260.0F, y + 32.0F}, false, input))
+                share_reconnect_requested_ = true;
             text(L"Kept in memory for this session only -- never written to kopt_internal.ini.",
-                {content_left + 2.0F, y + 4.0F, frame.right - 32.0F, y + 28.0F}, text_secondary, 11.0F);
+                {content_left + 270.0F, y + 4.0F, frame.right - 32.0F, y + 28.0F}, text_secondary, 11.0F);
             y += 40.0F;
             checkbox(L"Record Aim Lab trace (30 Hz / 20 seconds)", settings.aim_lab_recording,
                 content_left, y, input);
@@ -3584,6 +3594,19 @@ namespace kopt
             else if (active) active_text_input_ = -1;
         }
         bool changed{};
+        if (active_text_input_ == id && !input.frame_paste.empty())
+        {
+            for (const wchar_t character : input.frame_paste)
+            {
+                // Strip control characters (CR/LF/tab from a multi-line
+                // clipboard source) -- a pasted token is one field's worth
+                // of text, never a line break the caret should act on.
+                if (character < 32) continue;
+                if (value.size() >= maximum) break;
+                value.push_back(character);
+                changed = true;
+            }
+        }
         if (active_text_input_ == id && !input.frame_characters.empty())
         {
             for (const wchar_t character : input.frame_characters)

@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace kopt
@@ -30,6 +31,14 @@ namespace kopt
         std::atomic<int> captured_key{};
         std::mutex character_mutex;
         std::wstring pending_characters;
+        // Ctrl+V never reaches text_input() as WM_CHAR (Windows doesn't
+        // synthesize one for it), so payload.cpp's WndProc hook reads the
+        // clipboard itself on that keydown and hands the whole string here
+        // in one shot -- kept off pending_characters' 64-char throttle
+        // (sized for keystroke bursts, not a pasted JWT) so a paste can't
+        // be silently truncated mid-frame.
+        std::mutex paste_mutex;
+        std::wstring pending_paste;
         std::atomic<int> suppress_key_up{};
         std::atomic<bool> binding_capture{};
         std::atomic<bool> toggle_menu_requested{};
@@ -47,11 +56,22 @@ namespace kopt
         bool frame_click_consumed{};
         bool frame_right_click_consumed{};
         std::wstring frame_characters;
+        std::wstring frame_paste;
 
         void queue_character(const wchar_t character)
         {
             std::scoped_lock lock(character_mutex);
             if (pending_characters.size() < 64) pending_characters.push_back(character);
+        }
+
+        // Capped well above any real API key/JWT so one paste is never
+        // split across frames, but still bounded -- this runs off clipboard
+        // content, not something to trust as unbounded.
+        void queue_paste(std::wstring text)
+        {
+            std::scoped_lock lock(paste_mutex);
+            if (text.size() > 4096) text.resize(4096);
+            pending_paste = std::move(text);
         }
 
         void begin_frame() noexcept
@@ -66,6 +86,11 @@ namespace kopt
                 std::scoped_lock lock(character_mutex);
                 frame_characters.swap(pending_characters);
                 pending_characters.clear();
+            }
+            {
+                std::scoped_lock lock(paste_mutex);
+                frame_paste.swap(pending_paste);
+                pending_paste.clear();
             }
             frame_click_consumed = false;
             frame_right_click_consumed = false;
@@ -98,6 +123,13 @@ namespace kopt
         // render(), чтобы Diagnostics-вкладка могла показать статус
         // соединения без прямой связи с сетевым слоем.
         void set_share_connected(bool connected) noexcept { share_connected_ = connected; }
+        // Тем же принципом, что set_share_connected: payload.cpp зовёт это
+        // раз в кадр с фактическим адресом, на который сейчас настроен
+        // g_publisher (--backend override либо kopt_internal.ini
+        // Share.Endpoint -- см. payload.cpp::effective_endpoint), чтобы
+        // Diagnostics-таб показывал, куда реально уходит трафик, а не
+        // компилируемый по умолчанию KOPT_DEFAULT_SHARE_ENDPOINT.
+        void set_share_endpoint(std::wstring endpoint) { share_endpoint_display_ = std::move(endpoint); }
         // Тем же принципом, что set_share_connected: payload.cpp копирует
         // RemoteView::visible() под своим мьютексом раз в кадр и отдаёт
         // сюда -- оверлей не знает о g_remote_view/g_remote_view_mutex
@@ -113,8 +145,24 @@ namespace kopt
         // вызова).
         [[nodiscard]] const std::wstring& share_api_key() const noexcept { return share_api_key_; }
 
+        // Http3Publisher::start() (see its own doc comment) captures the
+        // token into the worker thread once and its internal reconnect
+        // loop keeps reusing that same copy forever -- editing the API key
+        // field after Share was already toggled on otherwise does nothing
+        // until the checkbox itself is retoggled. The Diagnostics tab's
+        // Apply button sets this; payload.cpp consumes it once per frame
+        // (exchange, not a plain read, so a click can't be double-applied
+        // across two ticks) and resets its own g_share_started so the
+        // normal start-gate re-fires with whatever key is in the field now.
+        [[nodiscard]] bool consume_share_reconnect_request() noexcept
+        {
+            return std::exchange(share_reconnect_requested_, false);
+        }
+
     private:
         bool share_connected_{};
+        bool share_reconnect_requested_{};
+        std::wstring share_endpoint_display_;
         std::vector<share::RemoteBatch> remote_batches_;
         struct Rect { float left{}; float top{}; float right{}; float bottom{}; };
         struct Vertex { float x{}, y{}, u{}, v{}; std::uint32_t color{}; };

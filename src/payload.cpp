@@ -948,6 +948,28 @@ namespace
                 g_input.queue_character(static_cast<wchar_t>(wparam));
                 return 0;
             }
+            // Windows never synthesizes WM_CHAR for Ctrl+V -- text_input()
+            // only ever saw single keystrokes without this. API keys/JWTs
+            // are long enough that requiring the player to type one by
+            // hand (through a hooked, hidden-cursor overlay) isn't a real
+            // option, so the paste is read here, off the clipboard, on the
+            // keydown itself.
+            if (message == WM_KEYDOWN && wparam == 'V' && (GetKeyState(VK_CONTROL) & 0x8000) != 0)
+            {
+                if (OpenClipboard(window))
+                {
+                    if (const HANDLE clipboard_data = GetClipboardData(CF_UNICODETEXT))
+                    {
+                        if (const auto* text = static_cast<const wchar_t*>(GlobalLock(clipboard_data)))
+                        {
+                            g_input.queue_paste(std::wstring(text));
+                            GlobalUnlock(clipboard_data);
+                        }
+                    }
+                    CloseClipboard();
+                }
+                return 0;
+            }
             switch (message)
             {
             case WM_SETCURSOR:
@@ -1124,6 +1146,15 @@ namespace
                 g_overlay.update_feature_hotkeys(g_settings);
                 g_runtime.update(g_settings, delta_seconds);
                 const auto& snapshot = g_runtime.snapshot();
+                // Кнопка Apply на Diagnostics-табе: g_publisher->start()
+                // захватывает токен в воркер-поток один раз (см. его
+                // собственный комментарий), внутренний reconnect-луп
+                // переиспользует именно эту копию вечно -- правка поля API
+                // key после того, как Share уже был включён, иначе ни на
+                // что не влияет, пока не переключить чекбокс туда-обратно.
+                // Сброс g_share_started здесь заставляет блок ниже
+                // перезапустить паблишер со свежим g_overlay.share_api_key().
+                if (g_overlay.consume_share_reconnect_request()) g_share_started = false;
                 // Живой старт/стоп: тумблер в интерфейсе (Diagnostics-таб)
                 // меняет g_settings.share_enabled в любой момент, а не
                 // только на загрузке payload'а -- без этой проверки
@@ -1297,6 +1328,14 @@ namespace
                 }
                 ensure_camera_hook();
                 g_overlay.set_share_connected(g_publisher->connected());
+                // Same override precedence as effective_endpoint above (a
+                // --backend at inject time beats kopt_internal.ini's
+                // Share.Endpoint) -- shown on the Diagnostics tab every
+                // frame, not just while a start attempt is being gated,
+                // so the menu always reflects what g_publisher is actually
+                // configured for, not the compile-time KOPT_DEFAULT_SHARE_ENDPOINT.
+                g_overlay.set_share_endpoint(!g_backend_endpoint.empty() ?
+                    g_backend_endpoint : g_settings.share_endpoint);
                 {
                     // Copy under the lock, hand the plain vector to the
                     // overlay -- it never touches g_remote_view_mutex
