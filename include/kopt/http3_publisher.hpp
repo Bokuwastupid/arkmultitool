@@ -7,7 +7,8 @@
 // проверен на стороне Go (backend/backend_go/internal/quicserver):
 // ALPN "ark-quic-v1", один двунаправленный стрим на соединение,
 // 4-байтный big-endian префикс длины перед каждым JSON-сообщением,
-// JSON-хендшейк {token, group_id, server_ip} первым сообщением.
+// JSON-хендшейк {token, server_ip} первым сообщением -- group_id в нём
+// больше нет, relay резолвит группу сам по account_id из token.
 //
 // Класс называется Http3Publisher по инерции от исходного плана (там
 // предполагался HTTP/3) -- сам транспорт HTTP-семантики не несёт вообще,
@@ -33,8 +34,7 @@ namespace kopt
         Http3Publisher(const Http3Publisher&) = delete;
         Http3Publisher& operator=(const Http3Publisher&) = delete;
 
-        void start(std::wstring endpoint, std::wstring token,
-            std::wstring group_id, std::wstring server_ip) override;
+        void start(std::wstring endpoint, std::wstring token, std::wstring server_ip) override;
         void stop() override;
         void submit_sightings(std::vector<share::Sighting> batch,
             std::vector<std::wstring> vanished) override;

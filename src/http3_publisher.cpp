@@ -215,12 +215,10 @@ namespace kopt
             return message.dump();
         }
 
-        std::string build_handshake_frame(const std::string& token, const std::string& group_id,
-            const std::string& server_ip)
+        std::string build_handshake_frame(const std::string& token, const std::string& server_ip)
         {
             json message;
             message["token"] = token;
-            message["group_id"] = group_id;
             message["server_ip"] = server_ip;
             return message.dump();
         }
@@ -325,7 +323,6 @@ namespace kopt
         std::string host;
         std::string port_str;
         std::string token_utf8;
-        std::string group_id_utf8;
         std::string server_ip_utf8;
 
         std::mutex out_mutex;
@@ -809,7 +806,7 @@ namespace kopt
                     if (!handshake_frame_queued)
                     {
                         handshake_frame_queued = true;
-                        queue_frame(build_handshake_frame(token_utf8, group_id_utf8, server_ip_utf8));
+                        queue_frame(build_handshake_frame(token_utf8, server_ip_utf8));
                     }
                 }
             }
@@ -875,7 +872,7 @@ namespace kopt
     Http3Publisher::Http3Publisher() : impl_(std::make_unique<Impl>()) {}
     Http3Publisher::~Http3Publisher() { stop(); }
 
-    void Http3Publisher::start(std::wstring endpoint, std::wstring token, std::wstring group_id, std::wstring server_ip)
+    void Http3Publisher::start(std::wstring endpoint, std::wstring token, std::wstring server_ip)
     {
         stop(); // idempotent: tears down any previous connection first
 
@@ -889,7 +886,6 @@ namespace kopt
         impl_->host = endpoint_utf8.substr(0, colon);
         impl_->port_str = endpoint_utf8.substr(colon + 1);
         impl_->token_utf8 = to_utf8(token);
-        impl_->group_id_utf8 = to_utf8(group_id);
         impl_->server_ip_utf8 = to_utf8(server_ip);
 
         // std::thread has no default exception handler at all -- an

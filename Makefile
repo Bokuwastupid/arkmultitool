@@ -72,8 +72,14 @@ endef
 # аккаунта/логина, ровно "launch parameter", как договорились.
 SHARE_TOKEN ?=
 
+# BACKEND -- необязателен: make inject BACKEND=host:port переопределяет
+# relay-адрес без пересборки/правки ini (injector.cpp::publish_backend_endpoint,
+# --backend). Без него payload берёт compile-time дефолт
+# (KOPT_RELAY_DEFAULT в CMakeLists.txt) или значение из kopt_internal.ini.
+BACKEND ?=
+
 inject:
-	$(call run_injector,--dll "$(WIN_DLL)"$(if $(SHARE_TOKEN), --share-token "$(SHARE_TOKEN)"))
+	$(call run_injector,--dll "$(WIN_DLL)"$(if $(SHARE_TOKEN), --share-token "$(SHARE_TOKEN)")$(if $(BACKEND), --backend "$(BACKEND)"))
 
 unload:
 	$(call run_injector,--unload)

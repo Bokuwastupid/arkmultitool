@@ -23,16 +23,16 @@ namespace kopt
         // потоке реализации, тот же контракт, что и у RelayClient::start
         // сегодня.
         //
-        // group_id/server_ip едут в JSON-хендшейке на ark_relay (см.
-        // backend/backend_go/internal/quicserver/handshake.go) -- сервер
-        // без них не пропустит SISMEMBER-проверку членства в группе.
-        // Настоящего источника (аккаунт знает свои группы, клиент узнаёт
-        // ip:port сервера при подключении к игре) пока нет -- см. config.hpp
-        // Share-секция: до появления обоих оба поля читаются из
-        // kopt_internal.ini как есть, тем же "launch parameter, не
-        // аккаунт-система" принципом, что уже применён к самому токену.
-        virtual void start(std::wstring endpoint, std::wstring token,
-            std::wstring group_id, std::wstring server_ip) = 0;
+        // Только token + server_ip едут в JSON-хендшейке на ark_relay (см.
+        // backend/backend_go/internal/quicserver/handshake.go) -- НЕ
+        // group_id: relay резолвит группу сам по account_id, которого
+        // token и так доказывает владение (Postgres account.active_group_id
+        // -> Redis, см. backend_python's core/group_cache.py). server_ip
+        // клиент по-прежнему передаёт сам -- ip:port игрового сервера
+        // relay иначе узнать неоткуда, читается из kopt_internal.ini
+        // (config.hpp Share-секция), тем же "launch parameter" принципом,
+        // что и токен.
+        virtual void start(std::wstring endpoint, std::wstring token, std::wstring server_ip) = 0;
 
         // Упорядоченная остановка: сигнал фоновым потокам, закрытие
         // соединения, join. Безопасно вызывать, даже если start() не
@@ -63,7 +63,7 @@ namespace kopt
     class NoopPublisher final : public Publisher
     {
     public:
-        void start(std::wstring, std::wstring, std::wstring, std::wstring) override {}
+        void start(std::wstring, std::wstring, std::wstring) override {}
         void stop() override {}
         void submit_sightings(std::vector<share::Sighting>, std::vector<std::wstring>) override {}
         void submit_notifications(std::vector<share::Notification>) override {}

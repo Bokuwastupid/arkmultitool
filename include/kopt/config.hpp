@@ -8,6 +8,20 @@
 #include <string>
 #include <vector>
 
+// Compile-time default for Settings::share_endpoint, overridable per build
+// via -DKOPT_DEFAULT_SHARE_ENDPOINT="host:port" (see CMakeLists.txt). This
+// is a DEFAULT only -- kopt_internal.ini's [Share] Endpoint and
+// kopt_injector.exe's --backend both still win over it at runtime (see
+// payload.cpp's effective_endpoint). Baking a specific relay address in
+// here means a text edit here + a rebuild, not just an ini edit, to
+// change it -- worth it only when handing pre-built binaries to people
+// who should never have to touch a flag or an ini file themselves.
+#ifndef KOPT_DEFAULT_SHARE_ENDPOINT
+#define KOPT_DEFAULT_SHARE_ENDPOINT "127.0.0.1:8443"
+#endif
+#define KOPT_WIDEN_(x) L##x
+#define KOPT_WIDEN(x) KOPT_WIDEN_(x)
+
 namespace kopt
 {
     struct Color
@@ -271,15 +285,19 @@ namespace kopt
         // политика "только в памяти", что и у токенов загрузчика, чтобы он
         // никогда не оказался в этом текстовом ini.
         //
-        // share_group_id/share_server_ip: то же самое "launch parameter,
-        // не аккаунт-система" по духу, но это не секреты (группа и адрес
-        // сервера, не учётные данные) -- живут в ini как есть, пока не
-        // появится настоящий источник (аккаунт знает свои группы; ip:port
-        // сервера клиент должен узнавать сам при подключении к игре --
-        // отдельная, ещё не решённая задача).
+        // share_server_ip: тот же "launch parameter, не аккаунт-система"
+        // принцип, но это не секрет (адрес игрового сервера, не учётные
+        // данные) -- живёт в ini как есть, пока клиент не научится
+        // надёжно узнавать ip:port сам при каждом подключении к игре.
+        //
+        // Группа, в которую льётся шеринг, клиентом больше не передаётся
+        // вообще -- ни в ini, ни в хендшейке. Relay резолвит её сам по
+        // account_id (Postgres account.active_group_id, зеркалится в
+        // Redis) -- один account одновременно шарит ровно в одну группу,
+        // управляется через POST /v1/accounts/me/active-group на
+        // backend_python, не отсюда.
         bool share_enabled{false};
-        std::wstring share_endpoint{L"127.0.0.1:8443"};
-        std::wstring share_group_id;
+        std::wstring share_endpoint{KOPT_WIDEN(KOPT_DEFAULT_SHARE_ENDPOINT)};
         std::wstring share_server_ip;
         float share_interval_ms{1000.0F};
 
