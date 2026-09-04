@@ -72,6 +72,16 @@ namespace kopt::share
         // такого id в памяти игры не существует ни у одного клиента.
         std::uint64_t stable_id{};
 
+        // Настоящий SteamID64, только для kind == Kind::player -- см.
+        // Actor::steam_id/read_player_steam_id (runtime.cpp) для того, как
+        // он читается, и почему 0 не всегда значит "неизвестен": может
+        // значить "владелец только что отключился" (PlayerState уже
+        // нулевой у ragdoll-пешки). Отдельно от stable_id намеренно:
+        // stable_id — суррогат для дедупа/reporter-идентичности внутри
+        // ARK-мира, steam_id — настоящая межплатформенная личность,
+        // разные назначения даже когда оба заполнены для одного игрока.
+        std::uint64_t steam_id{};
+
         std::int32_t team{};
         std::wstring label;
         std::wstring class_name;

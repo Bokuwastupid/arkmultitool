@@ -34,6 +34,12 @@ namespace kopt
         std::uintptr_t address{};
         std::uintptr_t root_component{};
         std::uint64_t linked_player_data_id{};
+        // Настоящий SteamID64 (не суррогат linked_player_data_id) -- задан
+        // только для kind == player, и только пока у пешки живой
+        // PlayerState (см. read_player_steam_id): 0, если PlayerState
+        // нулевой (владелец отключился -- "спящая" ragdoll-пешка) или
+        // цепочка чтения не прошла sanity-проверку диапазона SteamID64.
+        std::uint64_t steam_id{};
         ActorKind kind{ActorKind::other};
         Vec3 position{};
         Vec3 bounds_origin{};
@@ -176,6 +182,13 @@ namespace kopt
         // резолвится, а kopt::share нужен именно устойчивый id для тега
         // reported_by и дедупликации своих же отчётов на приёме.
         std::uint64_t local_stable_id{};
+        // Настоящий SteamID64 локального игрока -- та же цепочка чтения,
+        // что и Actor::steam_id для любого другого (см. read_player_steam_id
+        // в runtime.cpp), просто по local_character. Липко, как
+        // local_stable_id: PlayerState локального игрока сам по себе не
+        // пропадает на кадре, но раз уж соседние поля этого Snapshot держат
+        // такую гарантию, держим её и здесь, а не только у чужих Actor.
+        std::uint64_t local_steam_id{};
         // Собственные имя/трайб -- читаются тем же offsets_.player_name/
         // tribe_name, что и для любого другого Actor::kind == player (см.
         // read_actor() в runtime.cpp), просто по local_character вместо
@@ -272,6 +285,20 @@ namespace kopt
             std::uintptr_t tribe_name{0x790};
             std::uintptr_t player_name{0x14B0};
             std::uintptr_t linked_player_data_id{0x1720};
+            // Цепочка до настоящего SteamID64, найдена вживую 2026-09-04
+            // (сессия с реальным подключённым игроком, сверено байт-в-байт
+            // с его собственным SteamID64 из steamcommunity.com/profiles/):
+            // APawn::PlayerState (0x488, подтверждено PDB/DIA-дампом
+            // pdb-fields-latest.txt) -> AShooterPlayerState::UniqueID
+            // (0x4C0, FUniqueNetIdRepl/TSharedPtr, 16 байт -- живой
+            // reflection-дамп движка, отсутствует в статичном PDB) -> первые
+            // 8 байт как указатель -> +0x50 внутри объекта, на который он
+            // указывает, это и есть сырой little-endian SteamID64. Не
+            // ванильная UE4-раскладка ("+0x8 мимо vtable") -- у этого форка
+            // движка обёртка толще. См. read_player_steam_id().
+            std::uintptr_t pawn_player_state{0x488};
+            std::uintptr_t player_state_unique_id{0x4C0};
+            std::uintptr_t unique_id_steam_id{0x50};
             std::uintptr_t structure_name{0x4E8};
             std::uintptr_t status_component{0xCD0};
             std::uintptr_t status_current_values{0x818};
@@ -298,6 +325,11 @@ namespace kopt
         bool refresh_actor_dynamic(Actor& actor, float elapsed_seconds);
         bool read_local();
         bool read_actor(std::uintptr_t address, Actor& actor);
+        // Настоящий SteamID64 пешки character_address, или 0, если
+        // PlayerState нулевой (владелец отключился), цепочка чтения
+        // оборвалась, или итоговое значение не проходит sanity-проверку
+        // (не похоже на SteamID64 individual-аккаунта -- см. .cpp).
+        std::uint64_t read_player_steam_id(std::uintptr_t character_address) const;
         bool read_player_bones(std::uintptr_t address, const Vec3& actor_position, Actor& actor);
         void read_player_equipment(std::uintptr_t address, Actor& actor);
         float read_item_stat(std::uintptr_t item, int stat_index) const;

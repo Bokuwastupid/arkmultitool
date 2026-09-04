@@ -812,6 +812,8 @@ namespace kopt
             if (!name.empty()) snapshot_.local_name = name;
             const std::wstring tribe = read_fstring(snapshot_.local_character + offsets_.tribe_name);
             if (!tribe.empty()) snapshot_.local_tribe = tribe;
+            const std::uint64_t steam_id = read_player_steam_id(snapshot_.local_character);
+            if (steam_id != 0) snapshot_.local_steam_id = steam_id;
         }
         {
             const std::wstring server_ip = read_remote_server_ip(world);
@@ -1256,6 +1258,31 @@ namespace kopt
             PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
     }
 
+    std::uint64_t ArkRuntime::read_player_steam_id(const std::uintptr_t character_address) const
+    {
+        std::uintptr_t player_state{};
+        if (!read(character_address + offsets_.pawn_player_state, player_state) || player_state < 0x10000)
+            return 0; // владелец отключился -- пешка жива, PlayerState уже нет
+
+        std::uintptr_t unique_id_target{};
+        if (!read(player_state + offsets_.player_state_unique_id, unique_id_target) ||
+            unique_id_target < 0x10000)
+            return 0;
+
+        std::uint64_t steam_id{};
+        if (!read(unique_id_target + offsets_.unique_id_steam_id, steam_id)) return 0;
+
+        // SteamID64 individual-аккаунта всегда несёт один и тот же старший
+        // 32-битный префикс (universe=public, type=individual, instance=1)
+        // -- 0x01100001. Без этой проверки мусор из недочитанной/сдвинутой
+        // цепочки выглядел бы как правдоподобное число вместо явного нуля
+        // (Engineering Directive: fail closed, не эмитить правдоподобный на
+        // вид, но неверный результат).
+        constexpr std::uint64_t steam_id64_individual_prefix = 0x01100001ULL << 32;
+        if ((steam_id & 0xFFFFFFFF00000000ULL) != steam_id64_individual_prefix) return 0;
+        return steam_id;
+    }
+
     bool ArkRuntime::read_actor(const std::uintptr_t address, Actor& actor)
     {
         std::uintptr_t class_address{};
@@ -1286,7 +1313,10 @@ namespace kopt
         if (!std::isfinite(actor.last_render_time) || actor.last_render_time < 0.0)
             actor.last_render_time = 0.0;
         if (actor.kind == ActorKind::player)
+        {
             read(address + offsets_.linked_player_data_id, actor.linked_player_data_id);
+            actor.steam_id = read_player_steam_id(address);
+        }
         read(address + offsets_.targeting_team, actor.team);
         std::uintptr_t status{};
         if (read(address + offsets_.status_component, status) && status >= 0x10000)

@@ -49,6 +49,7 @@ namespace kopt::share
         out.kind = Kind::player;
         fill_common(a, out);
         out.stable_id = a.linked_player_data_id;
+        out.steam_id = a.steam_id;
         out.torpor = a.torpor;
         out.max_torpor = a.max_torpor;
         out.has_torpor = a.max_torpor > 0.0F;
@@ -127,6 +128,7 @@ namespace kopt::share
         out.kind = Kind::player;
         out.address = snapshot.local_pawn;
         out.stable_id = snapshot.local_stable_id;
+        out.steam_id = snapshot.local_steam_id;
         out.team = snapshot.local_team;
         out.x = snapshot.local_position.x;
         out.y = snapshot.local_position.y;

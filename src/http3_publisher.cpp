@@ -222,6 +222,14 @@ namespace kopt
             // platform_id on the Go side (see its own doc comment for why
             // this, not a real Steam/platform id, is what's available).
             if (s.kind == share::Kind::player && s.stable_id != 0) j["stable_id"] = s.stable_id;
+            // steam_id -- real SteamID64, only for Kind::player and only
+            // when read_player_steam_id() (runtime.cpp) resolved one (0
+            // when the owner disconnected, or the client hasn't hooked a
+            // PlayerState-bearing pawn for this target yet). Distinct from
+            // stable_id above: this is the real cross-platform identity,
+            // stable_id is the ARK-internal reporter/dedup surrogate --
+            // feeds protocol.Entity.SteamID on the Go side.
+            if (s.kind == share::Kind::player && s.steam_id != 0) j["steam_id"] = s.steam_id;
             return j;
         }
 
