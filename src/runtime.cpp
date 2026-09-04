@@ -1365,6 +1365,12 @@ namespace kopt
         {
             display = read_fstring(address + offsets_.descriptive_name);
             actor.tribe = read_fstring(address + offsets_.tribe_name);
+            // Непустое TamedName == приручено. Отдельное чтение, а не
+            // переиспользование display: display приходит из
+            // descriptive_name базового APrimalCharacter и у дикого тоже
+            // бывает непустым (это отображаемое имя существа, не признак
+            // владения) -- см. doc-комментарий Offsets::dino_tamed_name.
+            actor.tamed = !read_fstring(address + offsets_.dino_tamed_name).empty();
         }
         if (!display.empty()) actor.name = display;
         if (actor.turret)

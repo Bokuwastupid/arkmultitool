@@ -102,6 +102,13 @@ namespace kopt::share
         bool sleeping{};
         bool dead{};
 
+        // Приручено ли -- только для kind == Kind::dino (у остальных всегда
+        // false и смысла не несёт). Это не косметика для ESP, а признак,
+        // по которому принимающая сторона решает, писать ли существо в
+        // Postgres вообще: дикие живут только в живом Redis-слое и никуда
+        // не сохраняются (см. Actor::tamed, откуда значение приходит).
+        bool tamed{};
+
         // Заполнено только для kind == Kind::turret.
         std::optional<TurretInfo> turret;
     };

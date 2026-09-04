@@ -40,6 +40,14 @@ namespace kopt
         // нулевой (владелец отключился -- "спящая" ragdoll-пешка) или
         // цепочка чтения не прошла sanity-проверку диапазона SteamID64.
         std::uint64_t steam_id{};
+        // Приручено ли существо -- только для kind == dino, у остальных
+        // видов всегда false и смысла не несёт. Источник -- непустота
+        // APrimalDinoCharacter::TamedName (offsets_.dino_tamed_name), а НЕ
+        // descriptive_name: последнее живёт на базовом APrimalCharacter и
+        // общее с игроками, TamedName игра выставляет только по факту
+        // приручения. Ниже по каналу решает, попадёт ли существо в
+        // Postgres вообще (дикие не пишутся никуда, см. hub.maybeStream).
+        bool tamed{};
         ActorKind kind{ActorKind::other};
         Vec3 position{};
         Vec3 bounds_origin{};
@@ -282,6 +290,13 @@ namespace kopt
             std::uintptr_t is_dead{0x898};
             std::uintptr_t is_sleeping{0x884};
             std::uintptr_t descriptive_name{0xBE8};
+            // APrimalDinoCharacter::TamedName (подтверждён PDB/DIA-дампом
+            // tools/pdb-fields-latest.txt: TamedName offset=0x1280 внутри
+            // TYPE APrimalDinoCharacter). Отдельно от descriptive_name
+            // (0xBE8) намеренно: то поле объявлено на базовом
+            // APrimalCharacter и есть у игроков тоже, а это -- только у
+            // дино и только после приручения. Пустая строка == дикий.
+            std::uintptr_t dino_tamed_name{0x1280};
             std::uintptr_t tribe_name{0x790};
             std::uintptr_t player_name{0x14B0};
             std::uintptr_t linked_player_data_id{0x1720};

@@ -64,6 +64,7 @@ namespace kopt::share
         // Дино не имеет постоянного игрового id ни у одного клиента --
         // stable_id остаётся нулём, см. TurretInfo/Sighting doc-комментарий
         // в share.hpp про кросс-клиентную идентичность.
+        out.tamed = a.tamed;
         out.torpor = a.torpor;
         out.max_torpor = a.max_torpor;
         out.has_torpor = a.max_torpor > 0.0F;

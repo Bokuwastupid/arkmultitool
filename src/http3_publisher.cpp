@@ -230,6 +230,13 @@ namespace kopt
             // stable_id is the ARK-internal reporter/dedup surrogate --
             // feeds protocol.Entity.SteamID on the Go side.
             if (s.kind == share::Kind::player && s.steam_id != 0) j["steam_id"] = s.steam_id;
+            // tamed -- всегда для дино, даже false: это не опциональные
+            // метаданные, а признак, по которому релей решает, писать ли
+            // существо в durable-поток вообще (hub.maybeStream). Пропуск
+            // поля и явный false на приёме значат одно и то же ("дикий"),
+            // но явная передача снимает неоднозначность "старый клиент
+            // против дикого существа" в логах.
+            if (s.kind == share::Kind::dino) j["tamed"] = s.tamed;
             return j;
         }
 
