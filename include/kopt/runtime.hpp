@@ -523,6 +523,8 @@ namespace kopt
         // Bounded: a corrupt or mid-write TArray count is rejected rather
         // than walked.
         void scan_server_roster(std::uintptr_t world);
+        [[nodiscard]] bool matches_mission_trail(const std::wstring& class_lower) const;
+        void sync_mission_trail_patterns(const Settings& settings);
         bool read_player_bones(std::uintptr_t address, const Vec3& actor_position, Actor& actor);
         void read_player_equipment(std::uintptr_t address, Actor& actor);
         float read_item_stat(std::uintptr_t item, int stat_index) const;
@@ -610,6 +612,11 @@ namespace kopt
         std::vector<std::pair<float, std::size_t>> refresh_due_;
         std::unordered_set<std::wstring> mission_candidates_;
         std::vector<std::wstring> pending_mission_candidates_;
+        // Lowercased substrings from Settings::mission_trail_classes, re-split
+        // only when the setting string itself changes.
+        std::wstring mission_trail_spec_;
+        std::vector<std::wstring> mission_trail_patterns_;
+        bool log_unclassified_{};
         std::wstring status_{L"Waiting for ARK runtime"};
         struct ChamState
         {

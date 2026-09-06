@@ -316,6 +316,13 @@ namespace kopt
         horde_distance_m = read_float(path, L"OSD", L"DistanceM", horde_distance_m);
         explorer_note_esp = read_bool(path, L"ESP", L"ExplorerNotes", explorer_note_esp);
         mission_trail_esp = read_bool(path, L"ESP", L"MissionTrails", mission_trail_esp);
+        {
+            // Absent key reads as empty; keep the built-in default rather than
+            // silently classifying nothing.
+            const std::wstring configured = read_string(path, L"ESP", L"MissionTrailClasses");
+            if (!configured.empty()) mission_trail_classes = configured;
+        }
+        log_unclassified_classes = read_bool(path, L"Debug", L"LogUnclassifiedClasses", log_unclassified_classes);
         death_cache_esp = read_bool(path, L"ESP", L"DeathCaches", death_cache_esp);
         player_item_cache_esp = read_bool(path, L"ESP", L"PlayerItemCaches", player_item_cache_esp);
         dino_item_cache_esp = read_bool(path, L"ESP", L"DinoItemCaches", dino_item_cache_esp);
@@ -638,6 +645,8 @@ namespace kopt
         write_float(path, L"OSD", L"DistanceM", horde_distance_m);
         write_bool(path, L"ESP", L"ExplorerNotes", explorer_note_esp);
         write_bool(path, L"ESP", L"MissionTrails", mission_trail_esp);
+        write_value(path, L"ESP", L"MissionTrailClasses", mission_trail_classes);
+        write_bool(path, L"Debug", L"LogUnclassifiedClasses", log_unclassified_classes);
         write_bool(path, L"ESP", L"DeathCaches", death_cache_esp);
         write_bool(path, L"ESP", L"PlayerItemCaches", player_item_cache_esp);
         write_bool(path, L"ESP", L"DinoItemCaches", dino_item_cache_esp);

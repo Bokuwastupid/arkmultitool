@@ -108,6 +108,16 @@ namespace kopt
         float horde_distance_m{25000.0F};
         bool explorer_note_esp{true};
         bool mission_trail_esp{true};
+        // Case-insensitive substrings; a class matching any of them is treated
+        // as a mission trail. Editable from the ini precisely because the real
+        // blueprint names are not known yet -- a name found in the log can be
+        // added and tried without a rebuild.
+        std::wstring mission_trail_classes{L"missiontrail,missioncourse,missionwaypoint,"
+            L"missioncheckpoint,missionmarker,missionring,missionbeacon,"
+            L"trackmarker,footprint,animaltrack,huntmarker"};
+        // Logs every class the classifier rejected, once each. Off by default:
+        // it is a hunting tool, not something to leave running.
+        bool log_unclassified_classes{};
         bool death_cache_esp{false};
         bool player_item_cache_esp{true};
         bool dino_item_cache_esp{true};

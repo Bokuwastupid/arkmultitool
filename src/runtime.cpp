@@ -483,6 +483,7 @@ namespace kopt
             (settings.player_aim && settings.aim_hitbox_mode == 1 && settings.aim_point_method != 2);
         need_held_items_ = settings.show_held_items;
         discovery_budget_ms_ = settings.discovery_budget_ms;
+        sync_mission_trail_patterns(settings);
         refresh_budget_ms_ = settings.refresh_budget_ms;
         read_local();
         const auto now = std::chrono::steady_clock::now();
@@ -1735,7 +1736,11 @@ namespace kopt
         const ClassMeta metadata = class_meta(class_address);
         if (metadata.kind == ActorKind::other)
         {
-            if (metadata.mission_candidate && mission_candidates_.insert(metadata.name).second)
+            // Capped so a world full of unclassified props cannot grow this
+            // without bound; 2000 distinct names is far more than a mission run
+            // produces and still cheap to keep.
+            if (log_unclassified_ && metadata.mission_candidate && !metadata.name.empty() &&
+                mission_candidates_.size() < 2000 && mission_candidates_.insert(metadata.name).second)
                 pending_mission_candidates_.push_back(metadata.name);
             return false;
         }
@@ -2162,33 +2167,6 @@ namespace kopt
         }
     }
 
-    namespace
-    {
-        // Split from class_meta so the same test drives both classification and
-        // the diagnostic that reports near-misses.
-        bool mission_trail_class(const std::wstring& class_lower)
-        {
-            const bool mission_related = class_lower.find(L"mission") != std::wstring::npos;
-            if (!mission_related) return false;
-            return class_lower.find(L"trail") != std::wstring::npos ||
-                class_lower.find(L"course") != std::wstring::npos ||
-                class_lower.find(L"waypoint") != std::wstring::npos ||
-                class_lower.find(L"checkpoint") != std::wstring::npos ||
-                class_lower.find(L"marker") != std::wstring::npos ||
-                class_lower.find(L"ring") != std::wstring::npos ||
-                class_lower.find(L"beacon") != std::wstring::npos;
-        }
-
-        // Anything mission-related that classification still dropped. Logged
-        // once per distinct name so a mission run reveals the actual course
-        // actor names without flooding.
-        bool mission_trail_candidate(const std::wstring& class_lower)
-        {
-            return class_lower.find(L"mission") != std::wstring::npos &&
-                !mission_trail_class(class_lower);
-        }
-    }
-
     ArkRuntime::ClassMeta ArkRuntime::class_meta(const std::uintptr_t class_address)
     {
         const auto cached = class_cache_.find(class_address);
@@ -2242,13 +2220,43 @@ namespace kopt
         // that recur across them rather than on a fixed list; rejected classes
         // that look related are logged (see mission_trail_candidate) so the
         // real names can be added instead of guessed at.
-        else if (mission_trail_class(class_lower))
+        else if (matches_mission_trail(class_lower))
             result.kind = ActorKind::mission_trail;
 
-        result.mission_candidate = result.kind == ActorKind::other &&
-            mission_trail_candidate(class_lower);
+        result.mission_candidate = result.kind == ActorKind::other;
         class_cache_.emplace(class_address, result);
         return result;
+    }
+
+    bool ArkRuntime::matches_mission_trail(const std::wstring& class_lower) const
+    {
+        for (const std::wstring& pattern : mission_trail_patterns_)
+            if (!pattern.empty() && class_lower.find(pattern) != std::wstring::npos) return true;
+        return false;
+    }
+
+    void ArkRuntime::sync_mission_trail_patterns(const Settings& settings)
+    {
+        log_unclassified_ = settings.log_unclassified_classes;
+        if (settings.mission_trail_classes == mission_trail_spec_) return;
+        mission_trail_spec_ = settings.mission_trail_classes;
+        mission_trail_patterns_.clear();
+        std::wstring current;
+        for (const wchar_t character : mission_trail_spec_)
+        {
+            if (character == L',' || character == L';')
+            {
+                if (!current.empty()) mission_trail_patterns_.push_back(lower(current));
+                current.clear();
+                continue;
+            }
+            if (character != L' ') current.push_back(character);
+        }
+        if (!current.empty()) mission_trail_patterns_.push_back(lower(current));
+        // Changing the patterns re-classifies everything, so the cached verdicts
+        // and the already-reported names both have to go.
+        class_cache_.clear();
+        mission_candidates_.clear();
     }
 
     std::vector<std::wstring> ArkRuntime::take_mission_candidates()
