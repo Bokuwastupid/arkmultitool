@@ -13,6 +13,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -31,7 +32,12 @@ namespace kopt
         death_cache,
         horde_crate,
         element_node,
-        explorer_note
+        explorer_note,
+        // Mission course markers -- the trail a timed mission requires you to
+        // follow. They are ordinary world actors with no team and no structure
+        // base class, so before this they fell through classification entirely
+        // and were dropped at discovery.
+        mission_trail
     };
 
     // One entry of the server's replicated player roster (AGameState::
@@ -327,6 +333,9 @@ namespace kopt
         void queue_freecam_mouse_delta(long x, long y) noexcept;
         void restore_transient_state();
         void clear_alert_history();
+        // Hands over mission-related class names seen since the last call, so
+        // the payload can log them once each.
+        std::vector<std::wstring> take_mission_candidates();
         [[nodiscard]] const std::vector<JournalEntry>& journal() const noexcept { return journal_; }
         void clear_journal() noexcept { journal_.clear(); }
         [[nodiscard]] const Snapshot& snapshot() const noexcept { return snapshot_; }
@@ -378,6 +387,10 @@ namespace kopt
         {
             ActorKind kind{ActorKind::other};
             bool turret{};
+            // Mission-related but still unclassified. Drives the diagnostic
+            // that reports the real course-actor names instead of leaving the
+            // keyword match to guesswork.
+            bool mission_candidate{};
             std::wstring name;
         };
 
@@ -595,6 +608,8 @@ namespace kopt
         float discovery_budget_ms_{8.0F};
         float refresh_budget_ms_{6.0F};
         std::vector<std::pair<float, std::size_t>> refresh_due_;
+        std::unordered_set<std::wstring> mission_candidates_;
+        std::vector<std::wstring> pending_mission_candidates_;
         std::wstring status_{L"Waiting for ARK runtime"};
         struct ChamState
         {

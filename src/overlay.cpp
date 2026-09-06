@@ -98,6 +98,7 @@ namespace
             {L"esp.horde_rewards", L"Horde reward preview", L"OSD", &S::horde_reward_preview},
             {L"esp.horde_map_alert", L"Horde map alert", L"OSD", &S::horde_map_alert},
             {L"esp.explorer_notes", L"Explorer Notes / Chests", L"ESP", &S::explorer_note_esp},
+            {L"esp.mission_trails", L"Mission trails", L"ESP", &S::mission_trail_esp},
             {L"esp.death_caches", L"Death caches", L"ESP", &S::death_cache_esp},
             {L"esp.player_caches", L"Player item caches", L"ESP", &S::player_item_cache_esp},
             {L"esp.dino_caches", L"Dino item caches", L"ESP", &S::dino_item_cache_esp},
@@ -959,6 +960,7 @@ namespace kopt
             case ActorKind::horde_crate:
             case ActorKind::element_node: return settings.horde_esp;
             case ActorKind::explorer_note: return settings.explorer_note_esp;
+            case ActorKind::mission_trail: return settings.mission_trail_esp;
             case ActorKind::death_cache:
             {
                 if (!settings.death_cache_esp) return false;
@@ -1132,6 +1134,7 @@ namespace kopt
             if (actor.kind == ActorKind::horde_crate) color = settings.horde_crate_color;
             if (actor.kind == ActorKind::element_node) color = settings.element_node_color;
             if (actor.kind == ActorKind::explorer_note) color = settings.explorer_note_color;
+            else if (actor.kind == ActorKind::mission_trail) color = settings.mission_trail_color;
             color.a *= settings.esp_opacity;
 
             if (!feet_visible || !head_visible || feet.x < 0.0F || feet.x > width_ || feet.y < 0.0F || feet.y > height_)
@@ -2153,6 +2156,7 @@ namespace kopt
                     checkbox(L"Turrets", settings.turret_esp, content_left, y, input);
                     checkbox(L"Ground drops", settings.drop_esp, content_left, y, input);
                     checkbox(L"Explorer Notes / Chests", settings.explorer_note_esp, content_left, y, input);
+                    checkbox(L"Mission trails", settings.mission_trail_esp, content_left, y, input);
                     checkbox(L"Death caches", settings.death_cache_esp, content_left, y, input);
                     if (settings.death_cache_esp)
                     {
@@ -4345,6 +4349,7 @@ namespace kopt
         else if (id_view == L"esp.drops") entry_colors.emplace_back(L"Drop", &settings_context_->drop_color);
         else if (id_view == L"esp.death_caches") entry_colors.emplace_back(L"Cache", &settings_context_->death_cache_color);
         else if (id_view == L"esp.explorer_notes") entry_colors.emplace_back(L"Note", &settings_context_->explorer_note_color);
+        else if (id_view == L"esp.mission_trails") entry_colors.emplace_back(L"Trail", &settings_context_->mission_trail_color);
         else if (id_view == L"esp.horde")
         {
             entry_colors.emplace_back(L"OSD", &settings_context_->horde_crate_color);

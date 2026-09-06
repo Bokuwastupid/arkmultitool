@@ -1733,7 +1733,12 @@ namespace kopt
             return false;
         }
         const ClassMeta metadata = class_meta(class_address);
-        if (metadata.kind == ActorKind::other) return false;
+        if (metadata.kind == ActorKind::other)
+        {
+            if (metadata.mission_candidate && mission_candidates_.insert(metadata.name).second)
+                pending_mission_candidates_.push_back(metadata.name);
+            return false;
+        }
         Vec3 position{};
         if (!read_vec3(root + offsets_.component_to_world + offsets_.transform_translation, position)) return false;
 
@@ -2157,6 +2162,33 @@ namespace kopt
         }
     }
 
+    namespace
+    {
+        // Split from class_meta so the same test drives both classification and
+        // the diagnostic that reports near-misses.
+        bool mission_trail_class(const std::wstring& class_lower)
+        {
+            const bool mission_related = class_lower.find(L"mission") != std::wstring::npos;
+            if (!mission_related) return false;
+            return class_lower.find(L"trail") != std::wstring::npos ||
+                class_lower.find(L"course") != std::wstring::npos ||
+                class_lower.find(L"waypoint") != std::wstring::npos ||
+                class_lower.find(L"checkpoint") != std::wstring::npos ||
+                class_lower.find(L"marker") != std::wstring::npos ||
+                class_lower.find(L"ring") != std::wstring::npos ||
+                class_lower.find(L"beacon") != std::wstring::npos;
+        }
+
+        // Anything mission-related that classification still dropped. Logged
+        // once per distinct name so a mission run reveals the actual course
+        // actor names without flooding.
+        bool mission_trail_candidate(const std::wstring& class_lower)
+        {
+            return class_lower.find(L"mission") != std::wstring::npos &&
+                !mission_trail_class(class_lower);
+        }
+    }
+
     ArkRuntime::ClassMeta ArkRuntime::class_meta(const std::uintptr_t class_address)
     {
         const auto cached = class_cache_.find(class_address);
@@ -2205,9 +2237,23 @@ namespace kopt
         else if (class_lower.find(L"droppeditem") != std::wstring::npos ||
             class_lower.find(L"supplycrate") != std::wstring::npos)
             result.kind = ActorKind::drop;
+        // Mission course markers. The exact blueprint names are not documented
+        // anywhere and differ per mission type, so this matches on the parts
+        // that recur across them rather than on a fixed list; rejected classes
+        // that look related are logged (see mission_trail_candidate) so the
+        // real names can be added instead of guessed at.
+        else if (mission_trail_class(class_lower))
+            result.kind = ActorKind::mission_trail;
 
+        result.mission_candidate = result.kind == ActorKind::other &&
+            mission_trail_candidate(class_lower);
         class_cache_.emplace(class_address, result);
         return result;
+    }
+
+    std::vector<std::wstring> ArkRuntime::take_mission_candidates()
+    {
+        return std::exchange(pending_mission_candidates_, {});
     }
 
     std::wstring ArkRuntime::object_name(const std::uintptr_t object_address)

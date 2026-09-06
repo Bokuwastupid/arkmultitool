@@ -315,6 +315,7 @@ namespace kopt
         horde_map_alert = read_bool(path, L"OSD", L"MapAlert", horde_map_alert);
         horde_distance_m = read_float(path, L"OSD", L"DistanceM", horde_distance_m);
         explorer_note_esp = read_bool(path, L"ESP", L"ExplorerNotes", explorer_note_esp);
+        mission_trail_esp = read_bool(path, L"ESP", L"MissionTrails", mission_trail_esp);
         death_cache_esp = read_bool(path, L"ESP", L"DeathCaches", death_cache_esp);
         player_item_cache_esp = read_bool(path, L"ESP", L"PlayerItemCaches", player_item_cache_esp);
         dino_item_cache_esp = read_bool(path, L"ESP", L"DinoItemCaches", dino_item_cache_esp);
@@ -475,6 +476,7 @@ namespace kopt
         horde_crate_color = read_color(path, L"HordeCrate", horde_crate_color);
         element_node_color = read_color(path, L"ElementNode", element_node_color);
         explorer_note_color = read_color(path, L"ExplorerNote", explorer_note_color);
+        mission_trail_color = read_color(path, L"MissionTrail", mission_trail_color);
 
         debug_panel = read_bool(path, L"Runtime", L"DebugPanel", debug_panel);
         aim_lab_recording = read_bool(path, L"Runtime", L"AimLabRecording", aim_lab_recording);
@@ -635,6 +637,7 @@ namespace kopt
         write_bool(path, L"OSD", L"MapAlert", horde_map_alert);
         write_float(path, L"OSD", L"DistanceM", horde_distance_m);
         write_bool(path, L"ESP", L"ExplorerNotes", explorer_note_esp);
+        write_bool(path, L"ESP", L"MissionTrails", mission_trail_esp);
         write_bool(path, L"ESP", L"DeathCaches", death_cache_esp);
         write_bool(path, L"ESP", L"PlayerItemCaches", player_item_cache_esp);
         write_bool(path, L"ESP", L"DinoItemCaches", dino_item_cache_esp);
@@ -790,6 +793,7 @@ namespace kopt
         write_color(path, L"HordeCrate", horde_crate_color);
         write_color(path, L"ElementNode", element_node_color);
         write_color(path, L"ExplorerNote", explorer_note_color);
+        write_color(path, L"MissionTrail", mission_trail_color);
 
         write_bool(path, L"Runtime", L"DebugPanel", debug_panel);
         write_bool(path, L"Runtime", L"AimLabRecording", aim_lab_recording);

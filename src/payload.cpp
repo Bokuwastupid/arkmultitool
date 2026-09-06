@@ -1897,6 +1897,12 @@ namespace
                         player.name.empty() ? L"?" : player.name, player.player_id,
                         player.steam_id == 0 ? std::wstring(L"unresolved") : std::to_wstring(player.steam_id)));
                 }
+                // Mission-related classes that classification still rejected.
+                // The course-actor names are not documented and vary by mission
+                // type, so these are what turn the keyword match into a real
+                // list instead of a guess.
+                for (const std::wstring& candidate : g_runtime.take_mission_candidates())
+                    log_line(L"Mission class candidate (unclassified): " + candidate);
                 const std::uint32_t guard_hits = g_skeleton_guard_hits.load(std::memory_order_relaxed);
                 if (guard_hits != g_logged_skeleton_guard_hits)
                 {

@@ -107,6 +107,7 @@ namespace kopt
         bool horde_map_alert{true};
         float horde_distance_m{25000.0F};
         bool explorer_note_esp{true};
+        bool mission_trail_esp{true};
         bool death_cache_esp{false};
         bool player_item_cache_esp{true};
         bool dino_item_cache_esp{true};
@@ -290,6 +291,7 @@ namespace kopt
         Color horde_crate_color{1.0F, 0.48F, 0.12F, 1.0F};
         Color element_node_color{0.18F, 0.88F, 1.0F, 1.0F};
         Color explorer_note_color{1.0F, 0.82F, 0.22F, 1.0F};
+        Color mission_trail_color{0.30F, 1.0F, 0.55F, 1.0F};
 
         std::vector<std::int32_t> allied_teams;
         std::vector<FeatureBinding> feature_bindings;
