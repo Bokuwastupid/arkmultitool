@@ -916,6 +916,60 @@ namespace kopt
             const float limit_units = limit_m * 100.0F;
             return squared > limit_units * limit_units;
         };
+        // The category and relation gate, hoisted out of the draw loop. Standing in
+        // an owned base means ~16k structures that the relation filter discards;
+        // they used to be hashed for grouping, pushed into the ordered list and
+        // sorted before anything rejected them. Deciding here keeps all of that
+        // proportional to what can actually be drawn.
+        const auto category_enabled = [&](const Actor& actor) {
+            if (settings.battle_mode)
+            {
+                return actor.kind == ActorKind::player ||
+                    (actor.kind == ActorKind::dino && actor.team >= 50000) ||
+                    (actor.kind == ActorKind::structure && actor.turret);
+            }
+            const bool own = snapshot.local_team != 0 && actor.team == snapshot.local_team;
+            const bool allied = own || settings.is_allied(actor.team);
+            switch (actor.kind)
+            {
+            case ActorKind::player:
+                if (!settings.player_esp) return false;
+                if (!player_state_enabled(settings, player_esp_state(actor))) return false;
+                return own ? settings.esp_own_players :
+                    allied ? settings.esp_allied_players : settings.esp_enemy_players;
+            case ActorKind::dino:
+            {
+                const bool wild = actor.team < 50000;
+                if (!(wild ? settings.wild_dino_esp : settings.enemy_dino_esp)) return false;
+                if (own) return settings.esp_own_dinos;
+                if (allied) return settings.esp_allied_dinos;
+                return wild || settings.esp_enemy_dinos;
+            }
+            case ActorKind::structure:
+            {
+                if (!(actor.turret ? settings.turret_esp : settings.structure_esp)) return false;
+                if (actor.turret && settings.turret_hide_nonmatching && settings.turret_target_filter >= 0 &&
+                    actor.turret_targeting != settings.turret_target_filter) return false;
+                if (actor.team == 0) return settings.esp_neutral_structures;
+                if (own) return settings.esp_own_structures;
+                if (allied) return settings.esp_allied_structures;
+                return settings.esp_enemy_structures;
+            }
+            case ActorKind::drop: return settings.drop_esp;
+            case ActorKind::horde_crate:
+            case ActorKind::element_node: return settings.horde_esp;
+            case ActorKind::explorer_note: return settings.explorer_note_esp;
+            case ActorKind::death_cache:
+            {
+                if (!settings.death_cache_esp) return false;
+                const std::wstring cache_type = lower_copy(actor.class_name + L" " + actor.name);
+                const bool dino_cache = cache_type.find(L"dino") != std::wstring::npos ||
+                    cache_type.find(L"dinosaur") != std::wstring::npos;
+                return dino_cache ? settings.dino_item_cache_esp : settings.player_item_cache_esp;
+            }
+            default: return false;
+            }
+        };
         struct ActorGroup { std::uintptr_t representative{}; int count{}; float distance_squared{}; };
         // Keyed by a 64-bit hash, not a built string. Composing a wstring per
         // actor per frame (four to_wstring plus a lowercased class-name copy)
@@ -939,7 +993,7 @@ namespace kopt
         {
             for (const Actor& actor : snapshot.actors)
             {
-                if (!group_enabled(actor) || actor_text_filtered(actor)) continue;
+                if (!group_enabled(actor) || !category_enabled(actor) || actor_text_filtered(actor)) continue;
                 // Same distance cut as the draw list below. A member out of range
                 // can neither be drawn nor be the representative, so it would only
                 // cost a hash - and the count then reflects what is in range, which
@@ -993,6 +1047,7 @@ namespace kopt
             const float dz = actor.position.z - snapshot.camera.location.z;
             const float squared = dx * dx + dy * dy + dz * dz;
             if (beyond_visible_range(actor, squared)) continue;
+            if (!category_enabled(actor)) continue;
             ordered_actors.emplace_back(squared, &actor);
         }
         std::ranges::sort(ordered_actors, [](const auto& left, const auto& right) {
@@ -1016,59 +1071,13 @@ namespace kopt
                 }
                 actor_group_count = group->second;
             }
-            bool enabled{};
-            if (settings.battle_mode)
-            {
-                enabled = actor.kind == ActorKind::player ||
-                    (actor.kind == ActorKind::dino && actor.team >= 50000) ||
-                    (actor.kind == ActorKind::structure && actor.turret);
-            }
-            else if (actor.kind == ActorKind::player) enabled = settings.player_esp;
-            else if (actor.kind == ActorKind::dino)
-            {
-                const bool wild = actor.team < 50000;
-                enabled = wild ? settings.wild_dino_esp : settings.enemy_dino_esp;
-            }
-            else if (actor.kind == ActorKind::structure) enabled = actor.turret ? settings.turret_esp : settings.structure_esp;
-            else if (actor.kind == ActorKind::drop) enabled = settings.drop_esp;
-            else if (actor.kind == ActorKind::horde_crate || actor.kind == ActorKind::element_node)
-                enabled = settings.horde_esp;
-            else if (actor.kind == ActorKind::explorer_note) enabled = settings.explorer_note_esp;
-            else if (actor.kind == ActorKind::death_cache)
-            {
-                const std::wstring cache_type = lower_copy(actor.class_name + L" " + actor.name);
-                const bool dino_cache = cache_type.find(L"dino") != std::wstring::npos ||
-                    cache_type.find(L"dinosaur") != std::wstring::npos;
-                enabled = settings.death_cache_esp &&
-                    (dino_cache ? settings.dino_item_cache_esp : settings.player_item_cache_esp);
-            }
-            if (!enabled) continue;
+            // Category, relation and player-state gating already happened in the
+            // pre-pass; these are only the values the rest of the draw needs.
             const PlayerEspState player_state = actor.kind == ActorKind::player ?
                 player_esp_state(actor) : PlayerEspState::awake;
-            if (actor.kind == ActorKind::player && !player_state_enabled(settings, player_state)) continue;
             const bool own = snapshot.local_team != 0 && actor.team == snapshot.local_team;
             const bool allied = own || settings.is_allied(actor.team);
             const bool wild_relation = actor.kind == ActorKind::dino && actor.team < 50000;
-            const bool neutral = actor.team == 0;
-            if (actor.kind == ActorKind::player)
-            {
-                if ((own && !settings.esp_own_players) || (!own && allied && !settings.esp_allied_players) ||
-                    (!allied && !settings.esp_enemy_players)) continue;
-            }
-            else if (actor.kind == ActorKind::dino)
-            {
-                if ((own && !settings.esp_own_dinos) || (!own && allied && !settings.esp_allied_dinos) ||
-                    (!allied && !wild_relation && !settings.esp_enemy_dinos)) continue;
-            }
-            else if (actor.kind == ActorKind::structure)
-            {
-                if ((neutral && !settings.esp_neutral_structures) ||
-                    (!neutral && own && !settings.esp_own_structures) ||
-                    (!neutral && !own && allied && !settings.esp_allied_structures) ||
-                    (!neutral && !allied && !settings.esp_enemy_structures)) continue;
-                if (actor.turret && settings.turret_hide_nonmatching && settings.turret_target_filter >= 0 &&
-                    actor.turret_targeting != settings.turret_target_filter) continue;
-            }
 
             const float distance_m = distance3(actor.position, snapshot.camera.location) / 100.0F;
             const bool horde_actor = actor.kind == ActorKind::horde_crate || actor.kind == ActorKind::element_node;
