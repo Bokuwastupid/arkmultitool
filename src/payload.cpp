@@ -1994,6 +1994,22 @@ namespace
         return std::filesystem::path(buffer).parent_path();
     }
 
+    // Config and log live in one fixed per-user location instead of beside the
+    // DLL. Injecting the same build from a different folder used to mean a
+    // different ini, so settings looked like they reset themselves whenever the
+    // payload was run from a build output, a copied bundle or a temp directory.
+    // Falls back to the module directory when LOCALAPPDATA is unavailable.
+    std::filesystem::path user_data_directory()
+    {
+        const wchar_t* local_app_data = _wgetenv(L"LOCALAPPDATA");
+        if (local_app_data == nullptr || *local_app_data == L'\0') return module_directory();
+        std::filesystem::path directory = std::filesystem::path(local_app_data) / L"KOPT";
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        if (error) return module_directory();
+        return directory;
+    }
+
     // Приёмный колбэк подписки Publisher::subscribe -- вызывается на
     // фоновом read-потоке реализации транспорта, поэтому: (1) не трогает
     // ничего из hot-path Present-хука напрямую, только g_remote_view под
@@ -2020,10 +2036,24 @@ namespace
     DWORD WINAPI worker(void*)
     {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        const auto directory = module_directory();
+        const auto directory = user_data_directory();
         g_settings_path = directory / L"kopt_internal.ini";
         g_log_path = directory / L"kopt_internal.log";
+        // One-time adoption of a config that still sits next to the DLL, so
+        // moving to the shared location does not silently start from defaults.
+        if (!std::filesystem::exists(g_settings_path))
+        {
+            const auto legacy = module_directory() / L"kopt_internal.ini";
+            std::error_code copy_error;
+            if (legacy != g_settings_path && std::filesystem::exists(legacy, copy_error))
+            {
+                std::filesystem::copy_file(legacy, g_settings_path,
+                    std::filesystem::copy_options::none, copy_error);
+                if (!copy_error) log_line(L"Adopted existing configuration from the payload directory");
+            }
+        }
         log_line(L"Payload worker started");
+        log_line(L"Configuration: " + g_settings_path.wstring());
         // Named per-PID so kopt_injector.exe's --unload can find it without
         // already knowing kopt_payload.dll's remote base address. This
         // REPLACES an earlier CreateRemoteThread-into-KoptRequestUnload's-
