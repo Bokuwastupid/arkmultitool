@@ -336,6 +336,7 @@ namespace kopt
         // Hands over mission-related class names seen since the last call, so
         // the payload can log them once each.
         std::vector<std::wstring> take_mission_candidates();
+        std::vector<std::wstring> take_environment_dump();
         [[nodiscard]] const std::vector<JournalEntry>& journal() const noexcept { return journal_; }
         void clear_journal() noexcept { journal_.clear(); }
         [[nodiscard]] const Snapshot& snapshot() const noexcept { return snapshot_; }
@@ -525,6 +526,10 @@ namespace kopt
         void scan_server_roster(std::uintptr_t world);
         [[nodiscard]] bool matches_mission_trail(const std::wstring& class_lower) const;
         void sync_mission_trail_patterns(const Settings& settings);
+        // Reports every actor within dump_environment_m_ by class, recognised or
+        // not, aggregated by class name so a few thousand actors come out as a
+        // readable list rather than a few thousand lines.
+        void dump_environment();
         bool read_player_bones(std::uintptr_t address, const Vec3& actor_position, Actor& actor);
         void read_player_equipment(std::uintptr_t address, Actor& actor);
         float read_item_stat(std::uintptr_t item, int stat_index) const;
@@ -617,6 +622,9 @@ namespace kopt
         std::wstring mission_trail_spec_;
         std::vector<std::wstring> mission_trail_patterns_;
         bool log_unclassified_{};
+        float dump_environment_m_{};
+        std::chrono::steady_clock::time_point last_environment_dump_{};
+        std::vector<std::wstring> pending_environment_dump_;
         std::wstring status_{L"Waiting for ARK runtime"};
         struct ChamState
         {

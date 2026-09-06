@@ -323,6 +323,7 @@ namespace kopt
             if (!configured.empty()) mission_trail_classes = configured;
         }
         log_unclassified_classes = read_bool(path, L"Debug", L"LogUnclassifiedClasses", log_unclassified_classes);
+        dump_environment_m = read_float(path, L"Debug", L"DumpEnvironmentM", dump_environment_m);
         death_cache_esp = read_bool(path, L"ESP", L"DeathCaches", death_cache_esp);
         player_item_cache_esp = read_bool(path, L"ESP", L"PlayerItemCaches", player_item_cache_esp);
         dino_item_cache_esp = read_bool(path, L"ESP", L"DinoItemCaches", dino_item_cache_esp);
@@ -647,6 +648,7 @@ namespace kopt
         write_bool(path, L"ESP", L"MissionTrails", mission_trail_esp);
         write_value(path, L"ESP", L"MissionTrailClasses", mission_trail_classes);
         write_bool(path, L"Debug", L"LogUnclassifiedClasses", log_unclassified_classes);
+        write_float(path, L"Debug", L"DumpEnvironmentM", dump_environment_m);
         write_bool(path, L"ESP", L"DeathCaches", death_cache_esp);
         write_bool(path, L"ESP", L"PlayerItemCaches", player_item_cache_esp);
         write_bool(path, L"ESP", L"DinoItemCaches", dino_item_cache_esp);

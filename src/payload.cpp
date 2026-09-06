@@ -1903,6 +1903,7 @@ namespace
                 // list instead of a guess.
                 for (const std::wstring& candidate : g_runtime.take_mission_candidates())
                     log_line(L"Mission class candidate (unclassified): " + candidate);
+                for (const std::wstring& line : g_runtime.take_environment_dump()) log_line(line);
                 const std::uint32_t guard_hits = g_skeleton_guard_hits.load(std::memory_order_relaxed);
                 if (guard_hits != g_logged_skeleton_guard_hits)
                 {

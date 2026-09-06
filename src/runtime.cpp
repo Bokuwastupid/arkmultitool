@@ -537,6 +537,7 @@ namespace kopt
         // changes when somebody connects or leaves, which is minutes apart, and
         // the walk touches every PlayerState's FString.
         if (discovery_due) scan_server_roster(active_world_);
+        dump_environment();
         if (!mounted_performance_path || actor_state_refreshed)
             update_alerts(settings);
         profiler_age_elapsed_ += std::clamp(delta_seconds, 0.0F, 0.10F);
@@ -2238,6 +2239,7 @@ namespace kopt
     void ArkRuntime::sync_mission_trail_patterns(const Settings& settings)
     {
         log_unclassified_ = settings.log_unclassified_classes;
+        dump_environment_m_ = settings.dump_environment_m;
         if (settings.mission_trail_classes == mission_trail_spec_) return;
         mission_trail_spec_ = settings.mission_trail_classes;
         mission_trail_patterns_.clear();
@@ -2262,6 +2264,71 @@ namespace kopt
     std::vector<std::wstring> ArkRuntime::take_mission_candidates()
     {
         return std::exchange(pending_mission_candidates_, {});
+    }
+
+    std::vector<std::wstring> ArkRuntime::take_environment_dump()
+    {
+        return std::exchange(pending_environment_dump_, {});
+    }
+
+    void ArkRuntime::dump_environment()
+    {
+        if (dump_environment_m_ <= 0.0F || !snapshot_.local_valid) return;
+        const auto now = std::chrono::steady_clock::now();
+        // Every 5 s: often enough to catch actors that spawn partway through a
+        // mission, rare enough that the log stays readable.
+        if (last_environment_dump_.time_since_epoch().count() != 0 &&
+            now - last_environment_dump_ < std::chrono::seconds(5))
+            return;
+        last_environment_dump_ = now;
+
+        const float limit = dump_environment_m_ * 100.0F;
+        const float limit_squared = limit * limit;
+        struct Entry { int count{}; float nearest_squared{}; };
+        std::unordered_map<std::wstring, Entry> by_class;
+        const auto started = std::chrono::steady_clock::now();
+        for (const std::uintptr_t address : discovery_candidates_)
+        {
+            // Bounded like discovery itself -- this runs from Present.
+            if (std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - started).count() >= 12.0F) break;
+            std::uintptr_t class_address{};
+            std::uintptr_t root{};
+            if (!read(address + offsets_.object_class, class_address) || class_address < 0x10000 ||
+                !read(address + offsets_.actor_root_component, root) || root < 0x10000)
+                continue;
+            Vec3 position{};
+            if (!read_vec3(root + offsets_.component_to_world + offsets_.transform_translation, position))
+                continue;
+            const float dx = position.x - snapshot_.local_position.x;
+            const float dy = position.y - snapshot_.local_position.y;
+            const float dz = position.z - snapshot_.local_position.z;
+            const float squared = dx * dx + dy * dy + dz * dz;
+            if (squared > limit_squared) continue;
+            const std::wstring name = class_meta(class_address).name;
+            if (name.empty()) continue;
+            Entry& entry = by_class[name];
+            if (entry.count == 0 || squared < entry.nearest_squared) entry.nearest_squared = squared;
+            ++entry.count;
+        }
+        // Nearest first: whatever the player is standing on or walking through
+        // is what they are asking about.
+        std::vector<std::pair<float, std::wstring>> ordered;
+        ordered.reserve(by_class.size());
+        for (const auto& [name, entry] : by_class)
+            ordered.emplace_back(entry.nearest_squared,
+                name + L" x" + std::to_wstring(entry.count) + L" nearest=" +
+                    std::to_wstring(static_cast<int>(std::sqrt(entry.nearest_squared) / 100.0F)) + L"m");
+        std::sort(ordered.begin(), ordered.end(),
+            [](const auto& left, const auto& right) { return left.first < right.first; });
+        pending_environment_dump_.push_back(L"--- environment dump: " +
+            std::to_wstring(ordered.size()) + L" distinct classes within " +
+            std::to_wstring(static_cast<int>(dump_environment_m_)) + L"m ---");
+        for (const auto& [distance_squared, line] : ordered)
+        {
+            (void)distance_squared;
+            pending_environment_dump_.push_back(line);
+        }
     }
 
     std::wstring ArkRuntime::object_name(const std::uintptr_t object_address)

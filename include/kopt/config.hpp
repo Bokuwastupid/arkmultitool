@@ -112,12 +112,23 @@ namespace kopt
         // as a mission trail. Editable from the ini precisely because the real
         // blueprint names are not known yet -- a name found in the log can be
         // added and tried without a rebuild.
-        std::wstring mission_trail_classes{L"missiontrail,missioncourse,missionwaypoint,"
-            L"missioncheckpoint,missionmarker,missionring,missionbeacon,"
-            L"trackmarker,footprint,animaltrack,huntmarker"};
+        // Confirmed live, not guessed: an environment dump during a Hunt
+        // mission showed ten Emitter_HuntTracks_Debug_C along the trail, with
+        // MissionServerSidePoint_TargetLocation_C marking the objective. The
+        // remaining entries cover the other mission types by the naming shape
+        // those two established, and can be corrected from the ini as each one
+        // is actually seen.
+        std::wstring mission_trail_classes{L"hunttracks,missionserversidepoint,"
+            L"missiontrail,missioncourse,missionwaypoint,missioncheckpoint,"
+            L"missionmarker,missionring,missionbeacon"};
         // Logs every class the classifier rejected, once each. Off by default:
         // it is a hunting tool, not something to leave running.
         bool log_unclassified_classes{};
+        // Radius in metres for the environment dump; 0 disables it. Every actor
+        // within it is reported by class, regardless of whether the classifier
+        // recognises it, which is the only way to find something whose name is
+        // not known in advance.
+        float dump_environment_m{};
         bool death_cache_esp{false};
         bool player_item_cache_esp{true};
         bool dino_item_cache_esp{true};
