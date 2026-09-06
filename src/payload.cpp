@@ -253,6 +253,29 @@ namespace
     alignas(8) std::uint64_t g_none_fname{};
     std::atomic<std::uint32_t> g_skeleton_guard_hits{};
     std::atomic<std::uint64_t> g_camera_tick_lock_skips{};
+    // Camera ticks that did get the lock. Freecam smoothness is the ratio of
+    // these two, not the skip count on its own: a thousand skips against a
+    // hundred thousand ticks is nothing, a thousand against two thousand is a
+    // camera that visibly stutters and stalls.
+    std::atomic<std::uint64_t> g_camera_tick_lock_takes{};
+    // How long Present holds g_state_mutex, in microseconds, accumulated so the
+    // reader can turn it into a duty cycle. This is what the camera tick is
+    // losing the race against.
+    std::atomic<std::uint64_t> g_present_lock_hold_us{};
+    // Adds its own lifetime to g_present_lock_hold_us. Declared immediately
+    // inside Present's locked block so it measures exactly the span the camera
+    // tick can be shut out for, without having to find every exit from it.
+    struct PresentLockTimer
+    {
+        std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+        ~PresentLockTimer()
+        {
+            g_present_lock_hold_us.fetch_add(static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - started).count()),
+                std::memory_order_relaxed);
+        }
+    };
     std::atomic<std::uint32_t> g_diagnostic_feature_flags{};
     struct PanicState
     {
@@ -944,6 +967,7 @@ namespace
                 g_active_callbacks.fetch_sub(1, std::memory_order_acq_rel);
                 return;
             }
+            g_camera_tick_lock_takes.fetch_add(1, std::memory_order_relaxed);
             const int wheel_steps = g_freecam_wheel.exchange(0, std::memory_order_acq_rel);
             if (wheel_steps != 0)
             {
@@ -1492,6 +1516,7 @@ namespace
             if (overlay_ready)
             {
                 std::scoped_lock state_lock(g_state_mutex);
+                const PresentLockTimer present_lock_timer;
                 if (g_input.toggle_menu_requested.exchange(false, std::memory_order_acq_rel))
                 {
                     g_settings.menu_open = !g_settings.menu_open;
@@ -1913,7 +1938,23 @@ namespace
                 // measurement that survives the session.
                 {
                     std::wstring diagnostics;
-                    if (g_overlay.take_diagnostics_line(g_runtime, diagnostics)) log_line(diagnostics);
+                    if (g_overlay.take_diagnostics_line(g_runtime, diagnostics))
+                    {
+                        // Camera-tick contention rides along on the same line so a
+                        // freecam stutter report can be read against the frame cost
+                        // that caused it. Deltas, not totals: the ratio only means
+                        // anything over the interval it was measured in.
+                        const std::uint64_t skips = g_camera_tick_lock_skips.exchange(0, std::memory_order_relaxed);
+                        const std::uint64_t takes = g_camera_tick_lock_takes.exchange(0, std::memory_order_relaxed);
+                        const std::uint64_t held_us = g_present_lock_hold_us.exchange(0, std::memory_order_relaxed);
+                        const std::uint64_t total = skips + takes;
+                        diagnostics += L" cam_ticks=" + std::to_wstring(total) +
+                            L" cam_skips=" + std::to_wstring(skips) +
+                            L" cam_skip_pct=" + (total == 0 ? std::wstring(L"0") :
+                                std::to_wstring(skips * 100 / total)) +
+                            L" present_lock_ms=" + std::to_wstring(held_us / 1000);
+                        log_line(diagnostics);
+                    }
                 }
                 if (g_input.diagnostics_bundle_requested.exchange(false, std::memory_order_acq_rel))
                 {
