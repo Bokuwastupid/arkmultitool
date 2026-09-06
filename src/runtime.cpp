@@ -1037,10 +1037,17 @@ namespace kopt
         }
         if (snapshot_.local_mounted)
         {
-            // Mounted movement consumes camera/control state directly. Keep every
-            // unrelated camera-tick feature out of this path; only the verified
-            // Managarmr/Wyvern aim route may run. Cleanup undoes inherited rider state.
-            restore_freecam_near_clip();
+            // Mounted movement consumes camera/control state directly, so the
+            // features that write pawn state stay out of this path: no_sway and
+            // no_recoil address AShooterCharacter offsets, which land on the dino
+            // pawn while mounted and break its movement.
+            //
+            // Freecam is not one of those. run_camera only writes the camera POV
+            // (and its own FOV override is already self-gated on !local_mounted),
+            // so it cannot disturb the rider - it was being blocked here purely
+            // because it shared the camera tick with the features that do.
+            run_camera(settings, delta_seconds);
+            if (!settings.freecam) restore_freecam_near_clip();
             restore_no_recoil();
             restore_no_sway();
             restore_chams();

@@ -1559,8 +1559,11 @@ namespace
                         g_settings.dino_aim_activation_mode, snapshot.dino_aim_active));
                 const bool passive_game_tick_features = g_settings.no_recoil || g_settings.no_sway ||
                     g_settings.local_chams;
-                const bool camera_tick_required = aim_tick_required ||
-                    (!mounted_safe_mode && (g_settings.freecam || passive_game_tick_features));
+                // Freecam keeps the camera tick even while mounted: it only moves
+                // the camera POV, unlike the passive features below, which write
+                // character offsets and must stay off a dino pawn.
+                const bool camera_tick_required = aim_tick_required || g_settings.freecam ||
+                    (!mounted_safe_mode && passive_game_tick_features);
                 sync_camera_hook(camera_tick_required);
 
                 // A plain FOV override is a POD camera-cache update and does not justify
