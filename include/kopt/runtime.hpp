@@ -265,13 +265,10 @@ namespace kopt
         // (measured 2026-09-06, one entry while the server reported four), so
         // who is online is unanswerable but how many is exact.
         std::int32_t server_players_connected{};
-        // NumPlayerActors -- player pawns the server has spawned, which counts
-        // sleeping bodies too, so it runs above the connected count.
-        std::int32_t server_player_actors{};
-        // Player pawns we actually track, split by state. Compared against
-        // server_player_actors this says how much of the server's player
-        // population is reachable at all: the server counts every spawned pawn,
-        // we only get the ones replicated to us.
+        // Player pawns we actually track, split by state. There is no
+        // server-side pawn count to compare against (see
+        // game_state_num_player_actors), so this stands on its own: it is
+        // simply everything the client has been sent.
         std::int32_t tracked_players_awake{};
         std::int32_t tracked_players_sleeping{};
         std::int32_t tracked_players_knocked{};
@@ -456,7 +453,11 @@ namespace kopt
             std::uintptr_t player_state_player_name{0x470};
             std::uintptr_t player_state_player_id{0x490};
             std::uintptr_t game_state_num_connected{0x54C};
-            std::uintptr_t game_state_num_player_actors{0x548};
+            // AShooterGameState::NumPlayerActors (0x548, per the PDB) is
+            // deliberately not read: measured on a live server it holds -8,
+            // i.e. it is a server-side counter that is never replicated and
+            // contains junk on the client. The adjacent NumPlayerConnected is
+            // replicated and does track reality.
             std::uintptr_t structure_name{0x4E8};
             std::uintptr_t status_component{0xCD0};
             std::uintptr_t status_current_values{0x818};
