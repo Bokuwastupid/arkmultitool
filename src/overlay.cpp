@@ -1166,6 +1166,7 @@ namespace kopt
             else if (actor.kind == ActorKind::player) ++esp_stats_.players;
             else if (actor.kind == ActorKind::dino) ++esp_stats_.dinos;
             else if (actor.kind == ActorKind::structure) ++esp_stats_.structures;
+            else if (actor.kind == ActorKind::mission_trail) ++esp_stats_.trails;
             else ++esp_stats_.other;
 
             const float box_height = std::max(24.0F, feet.y - head.y);
@@ -3670,6 +3671,7 @@ namespace kopt
             L" dinos=" + std::to_wstring(esp_stats_.dinos) +
             L" structures=" + std::to_wstring(esp_stats_.structures) +
             L" turrets=" + std::to_wstring(esp_stats_.turrets) +
+            L" trails=" + std::to_wstring(esp_stats_.trails) +
             L" grouped=" + std::to_wstring(esp_stats_.grouped_away) +
             L" offscreen=" + std::to_wstring(esp_stats_.offscreen) +
             L" labels=" + std::to_wstring(esp_stats_.labels);

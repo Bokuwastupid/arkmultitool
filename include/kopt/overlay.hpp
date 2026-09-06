@@ -361,6 +361,7 @@ namespace kopt
             int dinos{};
             int structures{};
             int turrets{};
+            int trails{};
             int other{};
             int labels{};
             int offscreen{};

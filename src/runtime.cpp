@@ -1831,6 +1831,20 @@ namespace kopt
             if (note_name.starts_with(prefix)) note_name.erase(0, prefix.size());
             actor.name = L"Explorer Note: " + note_name;
         }
+        if (actor.kind == ActorKind::mission_trail)
+        {
+            // Without this the box draws unlabelled, which among the rest of the
+            // ESP reads as noise rather than as the trail. The class name is kept
+            // in the label because mission types differ and knowing which marker
+            // this is matters more than a generic word.
+            std::wstring trail_name = friendly_name(metadata.name);
+            for (const std::wstring_view noise : {L"Emitter ", L" Debug", L" C"})
+            {
+                const auto position = trail_name.find(noise);
+                if (position != std::wstring::npos) trail_name.erase(position, noise.size());
+            }
+            actor.name = trail_name.empty() ? L"Trail" : trail_name;
+        }
         if (actor.turret)
         {
             std::int32_t ammo{};
@@ -2286,6 +2300,10 @@ namespace kopt
         const float limit_squared = limit * limit;
         struct Entry { int count{}; float nearest_squared{}; };
         std::unordered_map<std::wstring, Entry> by_class;
+        // Individual actors as well as the per-class tally. Aggregation hides
+        // exactly the case this is for: something small and numerous underfoot
+        // collapses into one line and loses the fact that it is at 1 m.
+        std::vector<std::pair<float, std::wstring>> individuals;
         const auto started = std::chrono::steady_clock::now();
         for (const std::uintptr_t address : discovery_candidates_)
         {
@@ -2310,6 +2328,7 @@ namespace kopt
             Entry& entry = by_class[name];
             if (entry.count == 0 || squared < entry.nearest_squared) entry.nearest_squared = squared;
             ++entry.count;
+            individuals.emplace_back(squared, name);
         }
         // Nearest first: whatever the player is standing on or walking through
         // is what they are asking about.
@@ -2321,6 +2340,14 @@ namespace kopt
                     std::to_wstring(static_cast<int>(std::sqrt(entry.nearest_squared) / 100.0F)) + L"m");
         std::sort(ordered.begin(), ordered.end(),
             [](const auto& left, const auto& right) { return left.first < right.first; });
+        // Nearest 30 individually, before the per-class summary.
+        std::sort(individuals.begin(), individuals.end(),
+            [](const auto& left, const auto& right) { return left.first < right.first; });
+        if (individuals.size() > 30) individuals.resize(30);
+        pending_environment_dump_.push_back(L"--- nearest actors ---");
+        for (const auto& [squared, name] : individuals)
+            pending_environment_dump_.push_back(L"  " +
+                std::to_wstring(std::sqrt(squared) / 100.0F).substr(0, 5) + L"m  " + name);
         pending_environment_dump_.push_back(L"--- environment dump: " +
             std::to_wstring(ordered.size()) + L" distinct classes within " +
             std::to_wstring(static_cast<int>(dump_environment_m_)) + L"m ---");

@@ -113,14 +113,13 @@ namespace kopt
         // blueprint names are not known yet -- a name found in the log can be
         // added and tried without a rebuild.
         // Confirmed live, not guessed: an environment dump during a Hunt
-        // mission showed ten Emitter_HuntTracks_Debug_C along the trail, with
-        // MissionServerSidePoint_TargetLocation_C marking the objective. The
-        // remaining entries cover the other mission types by the naming shape
-        // those two established, and can be corrected from the ini as each one
-        // is actually seen.
-        std::wstring mission_trail_classes{L"hunttracks,missionserversidepoint,"
-            L"missiontrail,missioncourse,missionwaypoint,missioncheckpoint,"
-            L"missionmarker,missionring,missionbeacon"};
+        // mission showed ten Emitter_HuntTracks_Debug_C along the trail.
+        // MissionServerSidePoint_TargetLocation_C was in the same dump and was
+        // briefly included, but it is the objective marker, not the trail, and
+        // it does not belong in this category. The remaining entries are still
+        // guesses at the other mission types and stay editable from the ini.
+        std::wstring mission_trail_classes{L"hunttracks,missiontrail,missioncourse,"
+            L"missionwaypoint,missioncheckpoint,missionmarker,missionring,missionbeacon"};
         // Logs every class the classifier rejected, once each. Off by default:
         // it is a hunting tool, not something to leave running.
         bool log_unclassified_classes{};
