@@ -1806,7 +1806,7 @@ namespace
                 {
                     if (actor.kind != kopt::ActorKind::player) continue;
                     const std::wstring signature = actor.name + L"|" + actor.tribe + L"|" +
-                        std::to_wstring(actor.steam_id);
+                        std::to_wstring(actor.steam_id) + L"|" + std::to_wstring(actor.steam_id_stage);
                     const auto known = g_logged_player_contacts.find(actor.address);
                     if (known != g_logged_player_contacts.end() && known->second == signature) continue;
                     const bool update = known != g_logged_player_contacts.end();
@@ -1822,7 +1822,9 @@ namespace
                         update ? L"contact updated" : L"contact", actor.address,
                         actor.name.empty() ? L"?" : actor.name,
                         actor.tribe.empty() ? L"?" : actor.tribe,
-                        actor.steam_id == 0 ? std::wstring(L"unresolved") : std::to_wstring(actor.steam_id),
+                        actor.steam_id == 0 ?
+                            L"unresolved(stage=" + std::to_wstring(actor.steam_id_stage) + L")" :
+                            std::to_wstring(actor.steam_id),
                         actor.team, actor.position.x, actor.position.y, actor.position.z, distance_m));
                 }
                 const std::uint32_t guard_hits = g_skeleton_guard_hits.load(std::memory_order_relaxed);

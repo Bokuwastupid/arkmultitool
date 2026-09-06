@@ -849,7 +849,7 @@ namespace kopt
         // for a given pawn, and a pawn whose owner has disconnected legitimately
         // reads null again, which this must not overwrite with a stale value.
         if (actor.kind == ActorKind::player && actor.steam_id == 0)
-            actor.steam_id = read_player_steam_id(actor.address);
+            actor.steam_id = read_player_steam_id(actor.address, &actor.steam_id_stage);
         actor.bone_count = 0;
         if (actor.kind == ActorKind::player && need_player_bones_)
             read_player_bones(actor.address, actor.position, actor);
@@ -1617,19 +1617,25 @@ namespace kopt
             PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
     }
 
-    std::uint64_t ArkRuntime::read_player_steam_id(const std::uintptr_t character_address) const
+    std::uint64_t ArkRuntime::read_player_steam_id(const std::uintptr_t character_address,
+        std::uint8_t* const stage) const
     {
+        const auto fail = [stage](const SteamIdStage reason) {
+            if (stage != nullptr) *stage = static_cast<std::uint8_t>(reason);
+            return std::uint64_t{0};
+        };
         std::uintptr_t player_state{};
         if (!read(character_address + offsets_.pawn_player_state, player_state) || player_state < 0x10000)
-            return 0; // владелец отключился -- пешка жива, PlayerState уже нет
+            return fail(SteamIdStage::no_player_state); // владелец отключился -- пешка жива, PlayerState уже нет
 
         std::uintptr_t unique_id_target{};
         if (!read(player_state + offsets_.player_state_unique_id, unique_id_target) ||
             unique_id_target < 0x10000)
-            return 0;
+            return fail(SteamIdStage::no_unique_id);
 
         std::uint64_t steam_id{};
-        if (!read(unique_id_target + offsets_.unique_id_steam_id, steam_id)) return 0;
+        if (!read(unique_id_target + offsets_.unique_id_steam_id, steam_id))
+            return fail(SteamIdStage::unreadable_id);
 
         // SteamID64 individual-аккаунта всегда несёт один и тот же старший
         // 32-битный префикс (universe=public, type=individual, instance=1)
@@ -1638,7 +1644,9 @@ namespace kopt
         // (Engineering Directive: fail closed, не эмитить правдоподобный на
         // вид, но неверный результат).
         constexpr std::uint64_t steam_id64_individual_prefix = 0x01100001ULL << 32;
-        if ((steam_id & 0xFFFFFFFF00000000ULL) != steam_id64_individual_prefix) return 0;
+        if ((steam_id & 0xFFFFFFFF00000000ULL) != steam_id64_individual_prefix)
+            return fail(SteamIdStage::rejected_prefix);
+        if (stage != nullptr) *stage = static_cast<std::uint8_t>(SteamIdStage::resolved);
         return steam_id;
     }
 
@@ -1674,7 +1682,7 @@ namespace kopt
         if (actor.kind == ActorKind::player)
         {
             read(address + offsets_.linked_player_data_id, actor.linked_player_data_id);
-            actor.steam_id = read_player_steam_id(address);
+            actor.steam_id = read_player_steam_id(address, &actor.steam_id_stage);
         }
         read(address + offsets_.targeting_team, actor.team);
         std::uintptr_t status{};

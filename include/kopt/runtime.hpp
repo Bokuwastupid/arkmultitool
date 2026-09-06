@@ -45,6 +45,13 @@ namespace kopt
         // нулевой (владелец отключился -- "спящая" ragdoll-пешка) или
         // цепочка чтения не прошла sanity-проверку диапазона SteamID64.
         std::uint64_t steam_id{};
+        // Why steam_id is still zero, for diagnostics only -- see
+        // SteamIdStage and read_player_steam_id(). Zero on its own says
+        // "fail closed" but not whether the pawn simply has no PlayerState
+        // (owner disconnected, or the server does not replicate it for
+        // remote players at all) or whether our offsets are wrong, and
+        // those two call for completely different work.
+        std::uint8_t steam_id_stage{};
         // Приручено ли существо -- только для kind == dino, у остальных
         // видов всегда false и смысла не несёт. Источник -- непустота
         // APrimalDinoCharacter::TamedName (offsets_.dino_tamed_name), а НЕ
@@ -427,7 +434,19 @@ namespace kopt
         // PlayerState нулевой (владелец отключился), цепочка чтения
         // оборвалась, или итоговое значение не проходит sanity-проверку
         // (не похоже на SteamID64 individual-аккаунта -- см. .cpp).
-        std::uint64_t read_player_steam_id(std::uintptr_t character_address) const;
+        // Which link of the PlayerState -> UniqueID -> SteamID64 chain failed.
+        // Reported through Actor::steam_id_stage purely so a zero can be told
+        // apart from a zero; nothing branches on it.
+        enum class SteamIdStage : std::uint8_t
+        {
+            resolved = 0,
+            no_player_state = 1,   // APawn::PlayerState read failed or was null
+            no_unique_id = 2,      // PlayerState::UniqueID read failed or was null
+            unreadable_id = 3,     // the +0x50 read itself failed
+            rejected_prefix = 4    // read fine, but not a SteamID64 individual account
+        };
+        std::uint64_t read_player_steam_id(std::uintptr_t character_address,
+            std::uint8_t* stage = nullptr) const;
         bool read_player_bones(std::uintptr_t address, const Vec3& actor_position, Actor& actor);
         void read_player_equipment(std::uintptr_t address, Actor& actor);
         float read_item_stat(std::uintptr_t item, int stat_index) const;
