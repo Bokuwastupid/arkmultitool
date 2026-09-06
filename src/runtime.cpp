@@ -546,6 +546,21 @@ namespace kopt
             for (const Actor& actor : snapshot_.actors)
                 snapshot_.oldest_actor_age_s = std::max(snapshot_.oldest_actor_age_s, actor.stale_seconds);
         }
+        snapshot_.tracked_players_awake = 0;
+        snapshot_.tracked_players_sleeping = 0;
+        snapshot_.tracked_players_knocked = 0;
+        snapshot_.tracked_players_dead = 0;
+        for (const Actor& actor : snapshot_.actors)
+        {
+            if (actor.kind != ActorKind::player) continue;
+            switch (player_esp_state(actor))
+            {
+            case PlayerEspState::awake: ++snapshot_.tracked_players_awake; break;
+            case PlayerEspState::sleeping: ++snapshot_.tracked_players_sleeping; break;
+            case PlayerEspState::knocked_out: ++snapshot_.tracked_players_knocked; break;
+            case PlayerEspState::dead: ++snapshot_.tracked_players_dead; break;
+            }
+        }
         snapshot_.runtime_update_ms = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - update_started).count();
     }

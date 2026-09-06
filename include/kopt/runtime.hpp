@@ -268,6 +268,14 @@ namespace kopt
         // NumPlayerActors -- player pawns the server has spawned, which counts
         // sleeping bodies too, so it runs above the connected count.
         std::int32_t server_player_actors{};
+        // Player pawns we actually track, split by state. Compared against
+        // server_player_actors this says how much of the server's player
+        // population is reachable at all: the server counts every spawned pawn,
+        // we only get the ones replicated to us.
+        std::int32_t tracked_players_awake{};
+        std::int32_t tracked_players_sleeping{};
+        std::int32_t tracked_players_knocked{};
+        std::int32_t tracked_players_dead{};
         bool server_roster_scanned{};
         // Собственные имя/трайб -- читаются тем же offsets_.player_name/
         // tribe_name, что и для любого другого Actor::kind == player (см.

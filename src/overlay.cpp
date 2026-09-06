@@ -3656,6 +3656,10 @@ namespace kopt
             L" refresh_deferred=" + std::to_wstring(snapshot.refresh_deferred) +
             L" online=" + std::to_wstring(snapshot.server_players_connected) +
             L" player_actors=" + std::to_wstring(snapshot.server_player_actors) +
+            L" tracked_players=" + std::to_wstring(snapshot.tracked_players_awake) + L"/" +
+                std::to_wstring(snapshot.tracked_players_sleeping) + L"/" +
+                std::to_wstring(snapshot.tracked_players_knocked) + L"/" +
+                std::to_wstring(snapshot.tracked_players_dead) +
             L" oldest_s=" + fixed(snapshot.oldest_actor_age_s, 2) +
             L" tracked=" + std::to_wstring(snapshot.actors.size()) +
             L" drawn=" + std::to_wstring(esp_stats_.drawn) +
@@ -3711,6 +3715,10 @@ namespace kopt
         row(L"Refresh backlog", std::to_wstring(snapshot.refresh_deferred), text_primary);
         row(L"Players online", std::to_wstring(snapshot.server_players_connected), text_primary);
         row(L"Player actors", std::to_wstring(snapshot.server_player_actors), text_primary);
+        row(L"Tracked awake | asleep", std::to_wstring(snapshot.tracked_players_awake) + L" | " +
+            std::to_wstring(snapshot.tracked_players_sleeping), text_primary);
+        row(L"Tracked out | dead", std::to_wstring(snapshot.tracked_players_knocked) + L" | " +
+            std::to_wstring(snapshot.tracked_players_dead), text_primary);
         row(L"Oldest actor", fixed(snapshot.oldest_actor_age_s, 2) + L" s",
             snapshot.oldest_actor_age_s > 5.0F ? warning : text_primary);
         row(L"Captures", std::to_wstring(snapshot.captures), text_secondary);
