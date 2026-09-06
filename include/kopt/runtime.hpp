@@ -13,6 +13,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace kopt
@@ -416,8 +417,9 @@ namespace kopt
 
         bool resolve_globals();
         bool capture();
-        bool refresh_known(float delta_seconds);
+        bool refresh_known(const Settings& settings, float delta_seconds);
         static float refresh_cadence(ActorKind kind);
+        [[nodiscard]] bool structure_displayable(const Settings& settings, const Actor& actor) const;
         bool refresh_actor_dynamic(Actor& actor, float elapsed_seconds);
         bool read_local();
         bool read_actor(std::uintptr_t address, Actor& actor);
@@ -510,7 +512,7 @@ namespace kopt
         std::size_t discovery_cursor_{};
         float discovery_budget_ms_{8.0F};
         float refresh_budget_ms_{6.0F};
-        std::vector<std::size_t> refresh_due_;
+        std::vector<std::pair<float, std::size_t>> refresh_due_;
         std::wstring status_{L"Waiting for ARK runtime"};
         struct ChamState
         {

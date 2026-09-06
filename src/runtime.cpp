@@ -525,7 +525,7 @@ namespace kopt
             const float elapsed = last_live_refresh_.time_since_epoch().count() == 0 ?
                 live_refresh_interval_ms * 0.001F :
                 std::chrono::duration<float>(now - last_live_refresh_).count();
-            refresh_known(std::clamp(elapsed, 0.0F, 0.5F));
+            refresh_known(settings, std::clamp(elapsed, 0.0F, 0.5F));
             last_live_refresh_ = now;
             actor_state_refreshed = true;
             snapshot_.refresh_ms = std::chrono::duration<float, std::milli>(
@@ -705,7 +705,24 @@ namespace kopt
         return 0.50F;
     }
 
-    bool ArkRuntime::refresh_known(const float delta_seconds)
+    // Mirrors draw_esp's structure gate. A base the player owns is tens of
+    // thousands of actors that the relation filter throws away every frame, so
+    // paying full refresh cadence for them buys nothing. They stay tracked and
+    // keep refreshing, just an order of magnitude slower, so flipping a relation
+    // toggle brings them back within a few seconds instead of needing rediscovery.
+    bool ArkRuntime::structure_displayable(const Settings& settings, const Actor& actor) const
+    {
+        if (settings.battle_mode) return actor.turret;
+        if (!(actor.turret ? settings.turret_esp : settings.structure_esp)) return false;
+        const bool neutral = actor.team == 0;
+        if (neutral) return settings.esp_neutral_structures;
+        const bool own = snapshot_.local_team != 0 && actor.team == snapshot_.local_team;
+        if (own) return settings.esp_own_structures;
+        if (settings.is_allied(actor.team)) return settings.esp_allied_structures;
+        return settings.esp_enemy_structures;
+    }
+
+    bool ArkRuntime::refresh_known(const Settings& settings, const float delta_seconds)
     {
         if (!read_local()) return false;
         const auto refresh_started = std::chrono::steady_clock::now();
@@ -726,23 +743,24 @@ namespace kopt
         {
             Actor& actor = snapshot_.actors[index];
             actor.refresh_elapsed += delta_seconds;
-            const float cadence = refresh_cadence(actor.kind);
+            float cadence = refresh_cadence(actor.kind);
+            if (actor.kind == ActorKind::structure && !structure_displayable(settings, actor)) cadence *= 10.0F;
             if (actor.refresh_elapsed < cadence) continue;
             if (cadence <= 0.0F) refresh_one(actor);
-            else refresh_due_.push_back(index);
+            else refresh_due_.emplace_back(actor.refresh_elapsed - cadence, index);
         }
         if (!refresh_due_.empty())
         {
+            // Ordered by how far past its own cadence each actor is, so a stretched
+            // structure cannot crowd out a visible one just by having a longer window.
             std::sort(refresh_due_.begin(), refresh_due_.end(),
-                [this](const std::size_t left, const std::size_t right) {
-                    return snapshot_.actors[left].refresh_elapsed > snapshot_.actors[right].refresh_elapsed;
-                });
+                [](const auto& left, const auto& right) { return left.first > right.first; });
             const float remaining_budget_ms = std::max(1.0F, refresh_budget_ms_ -
                 std::chrono::duration<float, std::milli>(
                     std::chrono::steady_clock::now() - refresh_started).count());
             const auto budget_started = std::chrono::steady_clock::now();
             std::size_t served{};
-            for (const std::size_t index : refresh_due_)
+            for (const auto& [lateness, index] : refresh_due_)
             {
                 refresh_one(snapshot_.actors[index]);
                 ++served;
