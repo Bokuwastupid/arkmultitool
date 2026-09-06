@@ -227,6 +227,12 @@ namespace
     // first frames, which is the difference between a usable record and one that
     // just says "someone was here".
     std::unordered_map<std::uintptr_t, std::wstring> g_logged_player_contacts;
+    // Server roster entries already reported, keyed by PlayerState address.
+    // Joins and leaves are what matter, so this logs the transitions rather
+    // than re-listing the roster on every scan.
+    std::unordered_map<std::uintptr_t, std::wstring> g_logged_server_players;
+    bool g_logged_roster_availability{};
+    bool g_logged_roster_available{};
     int g_cursor_show_adjustment{};
     std::uint64_t g_game_swap_chain_area{};
     float g_pointer_scale_x{1.0F};
@@ -1754,6 +1760,8 @@ namespace
                     g_logged_horde_previews.clear();
                     g_logged_explorer_notes.clear();
                     g_logged_player_contacts.clear();
+                    g_logged_server_players.clear();
+                    g_logged_roster_availability = false;
                     log_line(std::format(L"World generation changed: {} address=0x{:X}",
                         snapshot.world_generation, snapshot.world_address));
                 }
@@ -1826,6 +1834,32 @@ namespace
                             L"unresolved(stage=" + std::to_wstring(actor.steam_id_stage) + L")" :
                             std::to_wstring(actor.steam_id),
                         actor.team, actor.position.x, actor.position.y, actor.position.z, distance_m));
+                }
+                // Whether the server replicates its player roster to us at all is
+                // the one fact that decides if map-wide player scanning is
+                // possible, so it is stated once per world rather than inferred
+                // from an empty list.
+                if (snapshot.server_roster_scanned &&
+                    (!g_logged_roster_availability ||
+                        g_logged_roster_available != !snapshot.server_players.empty()))
+                {
+                    g_logged_roster_availability = true;
+                    g_logged_roster_available = !snapshot.server_players.empty();
+                    log_line(std::format(
+                        L"Server roster: {} PlayerState entries readable, NumPlayerConnected={}",
+                        snapshot.server_players.size(), snapshot.server_players_connected));
+                }
+                for (const auto& player : snapshot.server_players)
+                {
+                    const std::wstring signature = player.name + L"|" + std::to_wstring(player.steam_id);
+                    const auto known = g_logged_server_players.find(player.player_state);
+                    if (known != g_logged_server_players.end() && known->second == signature) continue;
+                    const bool update = known != g_logged_server_players.end();
+                    g_logged_server_players[player.player_state] = signature;
+                    log_line(std::format(L"Server player {} 0x{:X}: name={} playerid={} steamid64={}",
+                        update ? L"updated" : L"seen", player.player_state,
+                        player.name.empty() ? L"?" : player.name, player.player_id,
+                        player.steam_id == 0 ? std::wstring(L"unresolved") : std::to_wstring(player.steam_id)));
                 }
                 const std::uint32_t guard_hits = g_skeleton_guard_hits.load(std::memory_order_relaxed);
                 if (guard_hits != g_logged_skeleton_guard_hits)

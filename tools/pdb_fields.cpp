@@ -103,7 +103,7 @@ namespace
         for (const std::wstring& wanted : *context->wanted)
         {
             if (name != wanted) continue;
-            std::wprintf(L"\n=== %s (size=%llu) ===\n", name.c_str(), symbol->Size);
+            std::wprintf(L"\n=== %s (size=%lu) ===\n", name.c_str(), symbol->Size);
             dump_type(context->base, symbol->TypeIndex, name);
             context->matched.push_back(name);
         }

@@ -532,6 +532,10 @@ namespace kopt
                 std::chrono::steady_clock::now() - refresh_started).count();
         }
         if (actor_state_refreshed) sample_actor_history();
+        // Tied to the discovery cadence rather than the refresh one: the roster
+        // changes when somebody connects or leaves, which is minutes apart, and
+        // the walk touches every PlayerState's FString.
+        if (discovery_due) scan_server_roster(active_world_);
         if (!mounted_performance_path || actor_state_refreshed)
             update_alerts(settings);
         profiler_age_elapsed_ += std::clamp(delta_seconds, 0.0F, 0.10F);
@@ -1615,6 +1619,60 @@ namespace kopt
         // MessageBeep sound previously used by radius alerts.
         if (play_sound && settings.alert_sound)
             PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+    }
+
+    std::uint64_t ArkRuntime::read_steam_id_from_player_state(const std::uintptr_t player_state) const
+    {
+        if (player_state < 0x10000) return 0;
+        std::uintptr_t unique_id_target{};
+        if (!read(player_state + offsets_.player_state_unique_id, unique_id_target) ||
+            unique_id_target < 0x10000)
+            return 0;
+        std::uint64_t steam_id{};
+        if (!read(unique_id_target + offsets_.unique_id_steam_id, steam_id)) return 0;
+        // Same individual-account prefix check as read_player_steam_id -- a
+        // half-written or mismatched read must fail closed, not produce a
+        // plausible-looking number.
+        constexpr std::uint64_t steam_id64_individual_prefix = 0x01100001ULL << 32;
+        if ((steam_id & 0xFFFFFFFF00000000ULL) != steam_id64_individual_prefix) return 0;
+        return steam_id;
+    }
+
+    void ArkRuntime::scan_server_roster(const std::uintptr_t world)
+    {
+        snapshot_.server_players.clear();
+        snapshot_.server_players_connected = 0;
+        snapshot_.server_roster_scanned = false;
+        if (world < 0x10000) return;
+        std::uintptr_t game_state{};
+        if (!read(world + offsets_.world_game_state, game_state) || game_state < 0x10000) return;
+        read(game_state + offsets_.game_state_num_connected, snapshot_.server_players_connected);
+
+        // TArray layout: data pointer, then int32 Num, then int32 Max.
+        std::uintptr_t data{};
+        std::int32_t count{};
+        if (!read(game_state + offsets_.game_state_player_array, data) ||
+            !read(game_state + offsets_.game_state_player_array + sizeof(std::uintptr_t), count))
+            return;
+        snapshot_.server_roster_scanned = true;
+        // An out-of-range count is a torn read of a live array, not a real
+        // roster -- walking it would fault or invent players. 512 is far
+        // above any real ARK server slot count.
+        if (data < 0x10000 || count <= 0 || count > 512) return;
+        snapshot_.server_players.reserve(static_cast<std::size_t>(count));
+        for (std::int32_t index = 0; index < count; ++index)
+        {
+            std::uintptr_t player_state{};
+            if (!read(data + static_cast<std::uintptr_t>(index) * sizeof(std::uintptr_t), player_state) ||
+                player_state < 0x10000)
+                continue;
+            ServerPlayer entry;
+            entry.player_state = player_state;
+            entry.name = read_fstring(player_state + offsets_.player_state_player_name);
+            read(player_state + offsets_.player_state_player_id, entry.player_id);
+            entry.steam_id = read_steam_id_from_player_state(player_state);
+            snapshot_.server_players.push_back(std::move(entry));
+        }
     }
 
     std::uint64_t ArkRuntime::read_player_steam_id(const std::uintptr_t character_address,

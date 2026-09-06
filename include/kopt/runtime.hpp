@@ -34,6 +34,18 @@ namespace kopt
         explorer_note
     };
 
+    // One entry of the server's replicated player roster (AGameState::
+    // PlayerArray), which is not tied to whether the player's pawn is
+    // streamed in -- this is how someone who merely joined the map becomes
+    // visible at all.
+    struct ServerPlayer
+    {
+        std::uintptr_t player_state{};
+        std::uint64_t steam_id{};
+        std::int32_t player_id{};
+        std::wstring name;
+    };
+
     struct Actor
     {
         std::uintptr_t address{};
@@ -243,6 +255,12 @@ namespace kopt
         // пропадает на кадре, но раз уж соседние поля этого Snapshot держат
         // такую гарантию, держим её и здесь, а не только у чужих Actor.
         std::uint64_t local_steam_id{};
+        // Snapshot of AGameState::PlayerArray. Empty means either the scan
+        // has not run yet or the roster genuinely is not replicated to this
+        // client -- server_roster_scanned tells those apart.
+        std::vector<ServerPlayer> server_players;
+        std::int32_t server_players_connected{};
+        bool server_roster_scanned{};
         // Собственные имя/трайб -- читаются тем же offsets_.player_name/
         // tribe_name, что и для любого другого Actor::kind == player (см.
         // read_actor() в runtime.cpp), просто по local_character вместо
@@ -402,6 +420,26 @@ namespace kopt
             std::uintptr_t pawn_player_state{0x488};
             std::uintptr_t player_state_unique_id{0x4C0};
             std::uintptr_t unique_id_steam_id{0x50};
+            // Server-wide player roster, reached without going through any
+            // pawn. Confirmed against the game's own ShooterGame.pdb with
+            // tools/pdb_fields.cpp (see tools/build-pdb-fields.ps1):
+            //   UWorld::GameState                 0x128  AGameState*
+            //   AGameState::PlayerArray           0x4C0  TArray<APlayerState*>
+            //   APlayerState::PlayerName          0x470  FString
+            //   APlayerState::PlayerId            0x490  int32
+            //   APlayerState::UniqueId            0x4C0  FUniqueNetIdRepl
+            //   AShooterGameState::NumPlayerConnected 0x54C int32
+            // This exists because APawn::PlayerState (0x488 above, and the
+            // offset is right -- same PDB) reads null for every remote pawn:
+            // the pawn -> PlayerState link is not replicated to clients, so
+            // a SteamID64 can never be resolved from a sighting alone. The
+            // PlayerState objects themselves are a separate replication
+            // channel, which this reads directly.
+            std::uintptr_t world_game_state{0x128};
+            std::uintptr_t game_state_player_array{0x4C0};
+            std::uintptr_t player_state_player_name{0x470};
+            std::uintptr_t player_state_player_id{0x490};
+            std::uintptr_t game_state_num_connected{0x54C};
             std::uintptr_t structure_name{0x4E8};
             std::uintptr_t status_component{0xCD0};
             std::uintptr_t status_current_values{0x818};
@@ -447,6 +485,13 @@ namespace kopt
         };
         std::uint64_t read_player_steam_id(std::uintptr_t character_address,
             std::uint8_t* stage = nullptr) const;
+        // Reads UniqueId straight off a PlayerState, skipping the pawn hop
+        // that read_player_steam_id() has to make.
+        [[nodiscard]] std::uint64_t read_steam_id_from_player_state(std::uintptr_t player_state) const;
+        // Refreshes snapshot_.server_players from AGameState::PlayerArray.
+        // Bounded: a corrupt or mid-write TArray count is rejected rather
+        // than walked.
+        void scan_server_roster(std::uintptr_t world);
         bool read_player_bones(std::uintptr_t address, const Vec3& actor_position, Actor& actor);
         void read_player_equipment(std::uintptr_t address, Actor& actor);
         float read_item_stat(std::uintptr_t item, int stat_index) const;
