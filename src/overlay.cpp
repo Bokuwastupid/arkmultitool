@@ -314,23 +314,11 @@ namespace
         return stream.str();
     }
 
-    enum class PlayerEspState
-    {
-        awake,
-        sleeping,
-        knocked_out,
-        dead
-    };
-
-    PlayerEspState player_esp_state(const kopt::Actor& actor)
-    {
-        if (kopt::actor_is_dead(actor)) return PlayerEspState::dead;
-        const float torpor_ratio = actor.max_torpor > 0.0F ?
-            std::clamp(actor.torpor / actor.max_torpor, 0.0F, 1.0F) : 0.0F;
-        if (torpor_ratio >= 0.95F) return PlayerEspState::knocked_out;
-        if (actor.sleeping) return PlayerEspState::sleeping;
-        return PlayerEspState::awake;
-    }
+    // Moved to kopt::PlayerEspState/player_esp_state (runtime.hpp) so
+    // relay_client's sighting export uses the exact same classification
+    // instead of a second copy that could drift.
+    using PlayerEspState = kopt::PlayerEspState;
+    using kopt::player_esp_state;
 
     bool player_recently_rendered(const kopt::Snapshot& snapshot, const kopt::Actor& actor,
         const float grace_ms)
@@ -616,6 +604,10 @@ namespace kopt
         esp_stats_ = {};
         const auto esp_started = std::chrono::steady_clock::now();
         if (settings.esp_enabled) draw_esp(settings, runtime);
+        // Shared sightings are drawn inside the ESP timing window on purpose:
+        // they are ESP, and the diagnostics number is only useful if it covers
+        // everything ESP costs per frame.
+        if (settings.esp_enabled) draw_remote_sightings(settings, runtime);
         esp_timing_.push(std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - esp_started).count());
         if (settings.horde_map_alert) draw_horde_alert(settings, runtime);
@@ -804,6 +796,41 @@ namespace kopt
             text(key_name(hotkey.key) + L" | " + modes[static_cast<std::size_t>(mode)],
                 {row.right - 128.0F, row.top, row.right - 10.0F, row.bottom}, accent, 10.0F, TextAlign::right);
             row_top += row_height;
+        }
+    }
+
+    void Overlay::draw_remote_sightings(const Settings& settings, const ArkRuntime& runtime)
+    {
+        if (remote_batches_.empty()) return;
+        const Snapshot& snapshot = runtime.snapshot();
+        if (!snapshot.local_valid) return;
+        // Отдельный, фиксированный цвет для "прислано тиммейтом" -- не
+        // пересекается ни с одним из существующих ESP-цветов (свой/союзник/
+        // враг/нейтрал), потому что это не то же самое измерение: рамка
+        // локального ESP кодирует отношение к цели, здесь же источник
+        // данных -- сам факт "это не я увидел, это тиммейт прислал".
+        static constexpr Color kRemoteColor{0.7F, 0.4F, 1.0F, 1.0F};
+        static constexpr Color kRemoteOutline{0.05F, 0.02F, 0.1F, 0.9F};
+        for (const share::RemoteBatch& batch : remote_batches_)
+        {
+            for (const share::Sighting& s : batch.sightings)
+            {
+                Vec2 screen{};
+                if (!runtime.world_to_screen({s.x, s.y, s.z}, width_, height_, screen)) continue;
+                const Rect marker{screen.x - 4.0F, screen.y - 4.0F, screen.x + 4.0F, screen.y + 4.0F};
+                fill(marker, kRemoteColor);
+                stroke(marker, kRemoteOutline, 1.0F);
+
+                std::wstring label = !s.label.empty() ? s.label : s.class_name;
+                if (label.empty()) label = L"?";
+                if (settings.show_distance)
+                {
+                    const float distance_m = distance3({s.x, s.y, s.z}, snapshot.camera.location) / 100.0F;
+                    label += (settings.compact_labels ? L"  " : L"\n") + fixed(distance_m) + L"m";
+                }
+                const Rect label_rect{screen.x - 100.0F, screen.y + 8.0F, screen.x + 100.0F, screen.y + 40.0F};
+                text(label, label_rect, kRemoteColor, settings.esp_label_size, TextAlign::center);
+            }
         }
     }
 
@@ -3148,6 +3175,28 @@ namespace kopt
         {
             draw_diagnostics_body(runtime, content_left + 2.0F, y, frame.right - 32.0F);
             y += 14.0F;
+            text(L"SHARE", {content_left + 2.0F, y, frame.right - 32.0F, y + 16.0F}, accent, 9.0F);
+            y += 20.0F;
+            checkbox(L"Share sightings & alerts with team", settings.share_enabled, content_left, y, input);
+            text(share_connected_ ? L"Share: connected" : L"Share: offline",
+                {content_left + 2.0F, y, frame.right - 32.0F, y + 28.0F},
+                share_connected_ ? success : text_secondary, 12.0F);
+            y += 22.0F;
+            text(L"Backend: " + (share_endpoint_display_.empty() ? L"(unknown)" : share_endpoint_display_),
+                {content_left + 2.0F, y, frame.right - 32.0F, y + 24.0F}, text_secondary, 11.0F);
+            y += 32.0F;
+            // 128 truncated a real RS256 JWT silently mid-paste -- header +
+            // claims + a 256-byte signature (~342 base64url chars alone)
+            // routinely runs 400-600+ chars; 4096 matches InputState::
+            // queue_paste's own clipboard cap so neither end truncates first.
+            text_input(L"API key (sent in place of --share-token if none was injected)",
+                share_api_key_, 40, content_left, y, input, 4096);
+            if (button(L"Apply (reconnect with this key)",
+                {content_left, y, content_left + 260.0F, y + 32.0F}, false, input))
+                share_reconnect_requested_ = true;
+            text(L"Kept in memory for this session only -- never written to kopt_internal.ini.",
+                {content_left + 270.0F, y + 4.0F, frame.right - 32.0F, y + 28.0F}, text_secondary, 11.0F);
+            y += 40.0F;
             text(L"AIM LAB", {content_left + 2.0F, y, frame.right - 32.0F, y + 16.0F}, accent, 9.0F);
             y += 20.0F;
             checkbox(L"Record Aim Lab trace (30 Hz / 20 seconds)", settings.aim_lab_recording,
@@ -4480,6 +4529,19 @@ namespace kopt
             else if (active) active_text_input_ = -1;
         }
         bool changed{};
+        if (active_text_input_ == id && !input.frame_paste.empty())
+        {
+            for (const wchar_t character : input.frame_paste)
+            {
+                // Strip control characters (CR/LF/tab from a multi-line
+                // clipboard source) -- a pasted token is one field's worth
+                // of text, never a line break the caret should act on.
+                if (character < 32) continue;
+                if (value.size() >= maximum) break;
+                value.push_back(character);
+                changed = true;
+            }
+        }
         if (active_text_input_ == id && !input.frame_characters.empty())
         {
             for (const wchar_t character : input.frame_characters)

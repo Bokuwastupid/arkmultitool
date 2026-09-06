@@ -210,6 +210,7 @@ namespace kopt
         camera_fov = std::clamp(camera_fov, 50.0F, 170.0F);
         chams_distance_m = std::clamp(chams_distance_m, 25.0F, 1500.0F);
         chams_budget = std::clamp(chams_budget, 8.0F, 512.0F);
+        share_interval_ms = std::clamp(share_interval_ms, 250.0F, 10000.0F);
         const auto normalize_color = [](Color& color) {
             color.r = std::clamp(color.r, 0.0F, 1.0F);
             color.g = std::clamp(color.g, 0.0F, 1.0F);
@@ -499,6 +500,12 @@ namespace kopt
         freecam_key = read_uint(path, L"Bindings", L"Freecam", freecam_key);
         esp_toggle_key = read_uint(path, L"Bindings", L"EspToggle", esp_toggle_key);
         panic_key = read_uint(path, L"Bindings", L"Panic", panic_key);
+        share_enabled = read_bool(path, L"Share", L"Enabled", share_enabled);
+        share_endpoint = read_string(path, L"Share", L"Endpoint");
+        if (share_endpoint.empty()) share_endpoint = KOPT_WIDEN(KOPT_DEFAULT_SHARE_ENDPOINT);
+        share_server_ip = read_string(path, L"Share", L"ServerIp");
+        share_interval_ms = read_float(path, L"Share", L"IntervalMs", share_interval_ms);
+        share_send_self_position = read_bool(path, L"Share", L"SendSelfPosition", share_send_self_position);
         allied_teams.clear();
         std::wstringstream teams(read_string(path, L"Relations", L"AlliedTeams"));
         std::wstring team_text;
@@ -801,6 +808,11 @@ namespace kopt
         write_uint(path, L"Bindings", L"Freecam", freecam_key);
         write_uint(path, L"Bindings", L"EspToggle", esp_toggle_key);
         write_uint(path, L"Bindings", L"Panic", panic_key);
+        write_bool(path, L"Share", L"Enabled", share_enabled);
+        write_value(path, L"Share", L"Endpoint", share_endpoint);
+        write_value(path, L"Share", L"ServerIp", share_server_ip);
+        write_float(path, L"Share", L"IntervalMs", share_interval_ms);
+        write_bool(path, L"Share", L"SendSelfPosition", share_send_self_position);
         std::wstring teams;
         for (const auto team : allied_teams)
         {

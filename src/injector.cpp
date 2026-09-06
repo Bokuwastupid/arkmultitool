@@ -7,12 +7,14 @@
 #include <array>
 #include <chrono>
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 
 namespace
 {
@@ -24,6 +26,14 @@ namespace
         explicit Handle(HANDLE handle) : value(handle) {}
         Handle(const Handle&) = delete;
         Handle& operator=(const Handle&) = delete;
+        Handle(Handle&& other) noexcept : value(std::exchange(other.value, INVALID_HANDLE_VALUE)) {}
+        Handle& operator=(Handle&& other) noexcept
+        {
+            if (this == &other) return *this;
+            if (value != nullptr && value != INVALID_HANDLE_VALUE) CloseHandle(value);
+            value = std::exchange(other.value, INVALID_HANDLE_VALUE);
+            return *this;
+        }
         [[nodiscard]] explicit operator bool() const { return value != nullptr && value != INVALID_HANDLE_VALUE; }
     };
 
@@ -38,6 +48,19 @@ namespace
         bool quick{};
         bool elevation_attempted{};
         int timeout_seconds{180};
+        // Empty -- kopt::share stays disconnected until a real account/
+        // login flow exists (deliberately out of scope for now, see
+        // publish_share_token's doc comment for how this gets to the
+        // payload at all).
+        std::wstring share_token;
+        // Empty means "no override" -- the payload falls back to
+        // kopt_internal.ini's Share.Endpoint (itself defaulting to
+        // 127.0.0.1:8443, see config.hpp). Lets moving the relay to a VPS
+        // be a launch-argument change instead of an ini edit or a rebuild:
+        // same shared-memory delivery as share_token, for the same reason
+        // (see publish_string_mapping's doc comment) -- a real environment
+        // variable can't reach an already-running ShooterGame.exe.
+        std::wstring backend_endpoint;
     };
 
     std::filesystem::path executable_directory()
@@ -51,10 +74,13 @@ namespace
     void usage()
     {
         std::wcout << L"KOPT Win64 / Proton injector\n\n"
-            << L"  kopt_injector.exe [--wait] [--process ShooterGame.exe] [--dll path]\n"
-            << L"  kopt_injector.exe --pid 1234 --dll path\n"
+            << L"  kopt_injector.exe [--wait] [--process ShooterGame.exe] [--dll path] "
+               L"[--share-token <jwt>] [--backend <host:port>]\n"
+            << L"  kopt_injector.exe --pid 1234 --dll path [--share-token <jwt>] [--backend <host:port>]\n"
             << L"  kopt_injector.exe --pid 1234 --unload\n"
-            << L"  kopt_injector.exe --self-test\n";
+            << L"  kopt_injector.exe --self-test\n\n"
+            << L"  --backend overrides kopt_internal.ini's Share.Endpoint for this session only\n"
+            << L"  (not written back to disk) -- point it at a VPS without touching the ini.\n";
     }
 
     std::optional<Options> parse(const int argc, wchar_t** argv)
@@ -74,12 +100,16 @@ namespace
             else if (argument == L"--elevated") options.elevation_attempted = true;
             else if (argument == L"--self-test") options.self_test = true;
             else if (argument == L"--unload") options.unload = true;
-            else if ((argument == L"--process" || argument == L"--dll" || argument == L"--pid" || argument == L"--timeout") && i + 1 < argc)
+            else if ((argument == L"--process" || argument == L"--dll" || argument == L"--pid" ||
+                    argument == L"--timeout" || argument == L"--share-token" ||
+                    argument == L"--backend") && i + 1 < argc)
             {
                 const std::wstring value = argv[++i];
                 if (argument == L"--process") options.process = value;
                 else if (argument == L"--dll") options.dll = value;
                 else if (argument == L"--pid") options.pid = std::wcstoul(value.c_str(), nullptr, 10);
+                else if (argument == L"--share-token") options.share_token = value;
+                else if (argument == L"--backend") options.backend_endpoint = value;
                 else options.timeout_seconds = std::max(1, static_cast<int>(std::wcstol(value.c_str(), nullptr, 10)));
             }
             else
@@ -330,6 +360,61 @@ namespace
         return true;
     }
 
+    // Delivers a string into the target process without executing any code
+    // there -- a named, PID-scoped, pagefile-backed shared memory section,
+    // mirroring g_unload_event's naming scheme in payload.cpp. Deliberately
+    // NOT CreateRemoteThread-into-an-exported-setter: that pattern (a raw
+    // start address inside the already-loaded, non-builtin kopt_payload.dll)
+    // was found to reliably hang under Proton/Wine once a session had
+    // cycled through a few inject/unload rounds -- see KoptRequestUnload's
+    // own history, now fixed the same way. Shared memory + kernel32's
+    // CreateFileMapping/OpenFileMapping needs no code execution in the
+    // target at all. Also NOT a real environment variable: this process's
+    // own env block (however it were set) could never reach an
+    // already-running ShooterGame.exe -- fixed since that process started,
+    // long before kopt_injector.exe ever runs.
+    //
+    // Shared by publish_share_token (the JWT) and publish_backend_endpoint
+    // (the relay address override) -- same delivery mechanism, different
+    // mapping name so the payload can tell them apart.
+    //
+    // Caller must keep the returned Handle alive until the payload has had
+    // a chance to read it (see kMappingHoldDuration in wmain below) --
+    // a pagefile-backed section is destroyed the moment its last handle
+    // anywhere closes, and kopt_injector.exe is a short-lived CLI process
+    // that would otherwise tear it down before the payload's worker
+    // thread even starts.
+    Handle publish_string_mapping(const std::wstring& name, const std::wstring& value, std::wstring& error)
+    {
+        const SIZE_T size = (value.size() + 1) * sizeof(wchar_t);
+        Handle mapping(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+            0, static_cast<DWORD>(size), name.c_str()));
+        if (!mapping)
+        {
+            error = L"CreateFileMappingW(" + name + L") failed (error " + std::to_wstring(GetLastError()) + L")";
+            return {};
+        }
+        void* view = MapViewOfFile(mapping.value, FILE_MAP_WRITE, 0, 0, size);
+        if (view == nullptr)
+        {
+            error = L"MapViewOfFile(" + name + L") failed (error " + std::to_wstring(GetLastError()) + L")";
+            return {};
+        }
+        memcpy(view, value.c_str(), size);
+        UnmapViewOfFile(view);
+        return mapping;
+    }
+
+    Handle publish_share_token(const DWORD pid, const std::wstring& token, std::wstring& error)
+    {
+        return publish_string_mapping(L"Kopt_ShareToken_" + std::to_wstring(pid), token, error);
+    }
+
+    Handle publish_backend_endpoint(const DWORD pid, const std::wstring& endpoint, std::wstring& error)
+    {
+        return publish_string_mapping(L"Kopt_BackendEndpoint_" + std::to_wstring(pid), endpoint, error);
+    }
+
     bool inject(const DWORD pid, const std::filesystem::path& dll, std::wstring& error)
     {
         Handle process(OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
@@ -407,8 +492,7 @@ namespace
 
     bool request_unload(const DWORD pid, std::wstring& error)
     {
-        Handle process(OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-            FALSE, pid));
+        Handle process(OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid));
         if (!process)
         {
             error = L"OpenProcess failed (error " + std::to_wstring(GetLastError()) + L")";
@@ -425,33 +509,28 @@ namespace
             error = L"No KOPT payload is loaded";
             return false;
         }
-        const HMODULE local_image = LoadLibraryExW(loaded->path.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
-        if (local_image == nullptr)
+        // Signals a named event the payload waits on (see payload.cpp's
+        // worker(), g_unload_event) instead of CreateRemoteThread'ing
+        // directly into KoptRequestUnload's address inside the target's
+        // copy of kopt_payload.dll. That used to work but was found to
+        // reliably hang (5s timeout, every time, on an otherwise perfectly
+        // alive/responsive target process) after a session had already
+        // gone through a few inject/unload cycles under Proton/Wine --
+        // CreateRemoteThread landing on an arbitrary address inside a
+        // third-party, non-builtin PE module is a far less exercised Wine
+        // code path than landing on a builtin export (kernel32!LoadLibraryW,
+        // used by inject() above, which never showed this problem).
+        // CreateEventW/SetEvent are exactly as "builtin" as LoadLibraryW.
+        const std::wstring event_name = L"Kopt_Unload_" + std::to_wstring(pid);
+        Handle event(OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name.c_str()));
+        if (!event)
         {
-            error = L"Could not map the loaded payload for export lookup (error " +
-                std::to_wstring(GetLastError()) + L")";
+            error = L"OpenEventW failed (error " + std::to_wstring(GetLastError()) + L")";
             return false;
         }
-        const FARPROC local_request = GetProcAddress(local_image, "KoptRequestUnload");
-        if (local_request == nullptr)
+        if (SetEvent(event.value) == FALSE)
         {
-            FreeLibrary(local_image);
-            error = L"Loaded payload has no KoptRequestUnload export";
-            return false;
-        }
-        const auto request_rva = reinterpret_cast<std::uintptr_t>(local_request) -
-            reinterpret_cast<std::uintptr_t>(local_image);
-        FreeLibrary(local_image);
-        Handle thread(CreateRemoteThread(process.value, nullptr, 0,
-            reinterpret_cast<LPTHREAD_START_ROUTINE>(loaded->base + request_rva), nullptr, 0, nullptr));
-        if (!thread)
-        {
-            error = L"CreateRemoteThread(unload) failed (error " + std::to_wstring(GetLastError()) + L")";
-            return false;
-        }
-        if (WaitForSingleObject(thread.value, 5000) != WAIT_OBJECT_0)
-        {
-            error = L"KoptRequestUnload call timed out";
+            error = L"SetEvent failed (error " + std::to_wstring(GetLastError()) + L")";
             return false;
         }
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
@@ -525,6 +604,29 @@ int run_injector(const int argc, wchar_t** argv)
         std::wcout << L"[KOPT] Payload unloaded cleanly.\n";
         return 0;
     }
+    // Published BEFORE inject() -- LoadLibraryW below starts the payload's
+    // worker thread almost immediately, which reads this at startup; the
+    // mapping has to already exist by then, not race to catch up after.
+    Handle share_token_mapping;
+    if (!options.share_token.empty())
+    {
+        share_token_mapping = publish_share_token(pid, options.share_token, error);
+        if (!share_token_mapping)
+        {
+            std::wcerr << L"[KOPT] Publishing share token failed: " << error << L"\n";
+            return 7;
+        }
+    }
+    Handle backend_endpoint_mapping;
+    if (!options.backend_endpoint.empty())
+    {
+        backend_endpoint_mapping = publish_backend_endpoint(pid, options.backend_endpoint, error);
+        if (!backend_endpoint_mapping)
+        {
+            std::wcerr << L"[KOPT] Publishing backend endpoint failed: " << error << L"\n";
+            return 8;
+        }
+    }
     if (!inject(pid, options.dll, error))
     {
         if (options.quick && error.find(L"already loaded") != std::wstring::npos)
@@ -543,8 +645,16 @@ int run_injector(const int argc, wchar_t** argv)
         std::wcerr << L"[KOPT] Injection failed: " << error << L"\n";
         return 5;
     }
-    if (options.quick)
-        quick_message(L"Injected successfully.\n\nHOME opens the menu. END unloads it.");
+    if (share_token_mapping || backend_endpoint_mapping)
+    {
+        // Hold the mapping(s) open past LoadLibraryW returning -- the
+        // payload's worker thread still has DXVK/render-ready waits ahead
+        // of it (observed 2-5s in practice) before it gets to reading
+        // these. A pagefile-backed section dies the instant every handle
+        // to it closes; kopt_injector.exe exiting right after inject()
+        // succeeds would otherwise race the payload's own startup.
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
     std::wcout << L"[KOPT] Payload loaded. HOME opens the in-game menu; END unloads it.\n";
     return 0;
 }

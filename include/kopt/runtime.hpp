@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <array>
@@ -37,6 +38,20 @@ namespace kopt
         std::uintptr_t address{};
         std::uintptr_t root_component{};
         std::uint64_t linked_player_data_id{};
+        // Настоящий SteamID64 (не суррогат linked_player_data_id) -- задан
+        // только для kind == player, и только пока у пешки живой
+        // PlayerState (см. read_player_steam_id): 0, если PlayerState
+        // нулевой (владелец отключился -- "спящая" ragdoll-пешка) или
+        // цепочка чтения не прошла sanity-проверку диапазона SteamID64.
+        std::uint64_t steam_id{};
+        // Приручено ли существо -- только для kind == dino, у остальных
+        // видов всегда false и смысла не несёт. Источник -- непустота
+        // APrimalDinoCharacter::TamedName (offsets_.dino_tamed_name), а НЕ
+        // descriptive_name: последнее живёт на базовом APrimalCharacter и
+        // общее с игроками, TamedName игра выставляет только по факту
+        // приручения. Ниже по каналу решает, попадёт ли существо в
+        // Postgres вообще (дикие не пишутся никуда, см. hub.maybeStream).
+        bool tamed{};
         ActorKind kind{ActorKind::other};
         Vec3 position{};
         Vec3 bounds_origin{};
@@ -84,6 +99,27 @@ namespace kopt
     [[nodiscard]] inline bool actor_is_dead(const Actor& actor) noexcept
     {
         return actor.dead || (actor.max_health > 0.0F && actor.health <= 0.0F);
+    }
+
+    enum class PlayerEspState : std::uint8_t
+    {
+        awake,
+        sleeping,
+        knocked_out,
+        dead
+    };
+
+    // Shared by overlay.cpp (ESP label/color) and relay_client's sighting
+    // export -- both need the same "what is this player doing right now"
+    // classification, and it was drifting out of sync as two copies before.
+    [[nodiscard]] inline PlayerEspState player_esp_state(const Actor& actor) noexcept
+    {
+        if (actor_is_dead(actor)) return PlayerEspState::dead;
+        const float torpor_ratio = actor.max_torpor > 0.0F ?
+            std::clamp(actor.torpor / actor.max_torpor, 0.0F, 1.0F) : 0.0F;
+        if (torpor_ratio >= 0.95F) return PlayerEspState::knocked_out;
+        if (actor.sleeping) return PlayerEspState::sleeping;
+        return PlayerEspState::awake;
     }
 
     struct Camera
@@ -139,6 +175,13 @@ namespace kopt
         float distance_m{};
         float value{};
         float remaining_s{};
+        // Абсолютная позиция цели, породившей событие. distance_m одного
+        // достаточно для локальной карточки (та же точка отсчёта, что у
+        // игрока, который её видит), но бесполезно на другом конце канала
+        // шеринга без своей точки отсчёта -- см. kopt::share::Notification.
+        // У групповых тревог (AlertKind::enemy_group) единой цели нет --
+        // остаётся нулевым, это не баг, а честное отсутствие точки.
+        Vec3 position{};
     };
 
     // One past contact, kept long after its alert expired. Alerts answer "what is
@@ -177,6 +220,41 @@ namespace kopt
         std::uintptr_t local_controller{};
         std::uintptr_t local_pawn{};
         std::uintptr_t local_character{};
+        // Игровой account-id локального игрока (linked_player_data_id) --
+        // тот же id, что уже кладётся в Actor::linked_player_data_id для
+        // остальных игроков. Нужен отдельным полем, а не поиском по
+        // local_character в actors: значение "липкое" (см. update()) и
+        // остаётся известным даже в кадрах, где local_character временно не
+        // резолвится, а kopt::share нужен именно устойчивый id для тега
+        // reported_by и дедупликации своих же отчётов на приёме.
+        std::uint64_t local_stable_id{};
+        // Настоящий SteamID64 локального игрока -- та же цепочка чтения,
+        // что и Actor::steam_id для любого другого (см. read_player_steam_id
+        // в runtime.cpp), просто по local_character. Липко, как
+        // local_stable_id: PlayerState локального игрока сам по себе не
+        // пропадает на кадре, но раз уж соседние поля этого Snapshot держат
+        // такую гарантию, держим её и здесь, а не только у чужих Actor.
+        std::uint64_t local_steam_id{};
+        // Собственные имя/трайб -- читаются тем же offsets_.player_name/
+        // tribe_name, что и для любого другого Actor::kind == player (см.
+        // read_actor() в runtime.cpp), просто по local_character вместо
+        // чужого адреса. Нужны как отдельные поля (не через actors -- self
+        // туда никогда не попадает, см. share.hpp::build_self_sighting):
+        // ark_relay's Entity.Validate() требует непустой label для
+        // Category player/dino, так что пустая строка здесь -- не
+        // "красивее", а разрывает всё QUIC-соединение отправителя.
+        std::wstring local_name;
+        std::wstring local_tribe;
+        // Реальный адрес игрового сервера ("ip:port"), прочитанный из
+        // UWorld->NetDriver->ServerConnection->URL (см. Offsets::net_driver
+        // и read_remote_server_ip() в runtime.cpp) -- закрывает пробел из
+        // плана DTO-шеринга §4: раньше server_ip для kopt::share был только
+        // ручным значением из kopt_internal.ini, теперь клиент узнаёт его
+        // сам при подключении к серверу, как и было задумано изначально.
+        // Липко, как local_stable_id -- не затирается пустым значением на
+        // кадре, где чтение временно не удалось. Пусто, пока не резолвится
+        // (загрузочный экран/меню, ещё не в игре).
+        std::wstring remote_server_ip;
         std::uintptr_t camera_manager{};
         std::int32_t local_team{};
         std::wstring local_pawn_class_name;
@@ -291,15 +369,48 @@ namespace kopt
             std::uintptr_t is_dead{0x898};
             std::uintptr_t is_sleeping{0x884};
             std::uintptr_t descriptive_name{0xBE8};
+            // APrimalDinoCharacter::TamedName (подтверждён PDB/DIA-дампом
+            // tools/pdb-fields-latest.txt: TamedName offset=0x1280 внутри
+            // TYPE APrimalDinoCharacter). Отдельно от descriptive_name
+            // (0xBE8) намеренно: то поле объявлено на базовом
+            // APrimalCharacter и есть у игроков тоже, а это -- только у
+            // дино и только после приручения. Пустая строка == дикий.
+            std::uintptr_t dino_tamed_name{0x1280};
             std::uintptr_t tribe_name{0x790};
             std::uintptr_t player_name{0x14B0};
             std::uintptr_t linked_player_data_id{0x1720};
+            // Цепочка до настоящего SteamID64, найдена вживую 2026-09-04
+            // (сессия с реальным подключённым игроком, сверено байт-в-байт
+            // с его собственным SteamID64 из steamcommunity.com/profiles/):
+            // APawn::PlayerState (0x488, подтверждено PDB/DIA-дампом
+            // pdb-fields-latest.txt) -> AShooterPlayerState::UniqueID
+            // (0x4C0, FUniqueNetIdRepl/TSharedPtr, 16 байт -- живой
+            // reflection-дамп движка, отсутствует в статичном PDB) -> первые
+            // 8 байт как указатель -> +0x50 внутри объекта, на который он
+            // указывает, это и есть сырой little-endian SteamID64. Не
+            // ванильная UE4-раскладка ("+0x8 мимо vtable") -- у этого форка
+            // движка обёртка толще. См. read_player_steam_id().
+            std::uintptr_t pawn_player_state{0x488};
+            std::uintptr_t player_state_unique_id{0x4C0};
+            std::uintptr_t unique_id_steam_id{0x50};
             std::uintptr_t structure_name{0x4E8};
             std::uintptr_t status_component{0xCD0};
             std::uintptr_t status_current_values{0x818};
             std::uintptr_t status_max_values{0xD8};
             std::uintptr_t character_mesh{0x4F8};
             std::uintptr_t mesh_space_bases{0x688};
+            // UWorld->NetDriver->ServerConnection->URL.Host/Port -- нашли
+            // живым сканом по имени класса (см. историю ArkRuntime::
+            // scan_net_connection в git-логе), не документированы Wildcard
+            // нигде. NetDriver/ServerConnection на этой сборке резолвятся в
+            // SteamNetDriver/SteamNetConnection (ARK поверх Steam
+            // Networking Sockets, не голый UE4 IpNetDriver) -- если
+            // Wildcard когда-нибудь сменит транспорт, эти четыре оффсета
+            // нужно переоткрывать заново тем же приёмом, не гадать.
+            std::uintptr_t net_driver{0x108};
+            std::uintptr_t net_driver_server_connection{0x78};
+            std::uintptr_t connection_url_host{0xF0};
+            std::uintptr_t connection_url_port{0x100};
         } offsets_{};
 
         bool resolve_globals();
@@ -308,6 +419,11 @@ namespace kopt
         bool refresh_actor_dynamic(Actor& actor, float elapsed_seconds);
         bool read_local();
         bool read_actor(std::uintptr_t address, Actor& actor);
+        // Настоящий SteamID64 пешки character_address, или 0, если
+        // PlayerState нулевой (владелец отключился), цепочка чтения
+        // оборвалась, или итоговое значение не проходит sanity-проверку
+        // (не похоже на SteamID64 individual-аккаунта -- см. .cpp).
+        std::uint64_t read_player_steam_id(std::uintptr_t character_address) const;
         bool read_player_bones(std::uintptr_t address, const Vec3& actor_position, Actor& actor);
         void read_player_equipment(std::uintptr_t address, Actor& actor);
         float read_item_stat(std::uintptr_t item, int stat_index) const;
@@ -322,6 +438,13 @@ namespace kopt
         void read_horde_details(std::uintptr_t class_address, Actor& actor);
         ClassMeta class_meta(std::uintptr_t class_address);
         std::wstring object_name(std::uintptr_t object_address);
+        // Читает UWorld->NetDriver->ServerConnection->URL.Host/Port через
+        // Offsets::net_driver/net_driver_server_connection/
+        // connection_url_host/connection_url_port (см. их doc-комментарий).
+        // Возвращает пусто, если любое из чтений по цепочке не удалось --
+        // snapshot_.remote_server_ip остаётся прежним значением (липко),
+        // не затирается.
+        std::wstring read_remote_server_ip(std::uintptr_t world);
         std::wstring resolve_name(std::int32_t index, std::int32_t number);
         std::wstring read_fstring(std::uintptr_t address, std::size_t cap = 256);
         bool read_vec3(std::uintptr_t address, Vec3& value) const;

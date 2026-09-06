@@ -1,7 +1,12 @@
 #include "kopt/config.hpp"
 #include "kopt/com_ptr.hpp"
 #include "kopt/overlay.hpp"
+#include "kopt/publisher.hpp"
 #include "kopt/runtime.hpp"
+#include "kopt/share.hpp"
+#include "kopt/share_filter.hpp"
+#include "kopt/share_remote.hpp"
+#include "kopt/http3_publisher.hpp"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -18,10 +23,12 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 using kopt::ComPtr;
 
@@ -41,9 +48,94 @@ namespace
     using DrawIndexedInstancedIndirectFn = void(__stdcall*)(ID3D11DeviceContext*, ID3D11Buffer*, UINT);
     using DrawInstancedIndirectFn = void(__stdcall*)(ID3D11DeviceContext*, ID3D11Buffer*, UINT);
 
+    // Read once, at worker() startup, from the named shared-memory section
+    // kopt_injector.exe's --share-token publishes (see its
+    // publish_share_token doc comment) -- never written to kopt_internal.ini,
+    // same "in memory only" policy the loader already applies to its own
+    // tokens. NOT an environment variable: GetEnvironmentVariableW reads
+    // THIS process's own environment block, fixed since ShooterGame.exe
+    // itself was launched, long before an injector ever runs -- setting an
+    // env var anywhere in the injector/loader cannot reach an
+    // already-running target process by any means. Empty means "not
+    // configured" (no --share-token was given at inject time); the
+    // tick-loop refuses to start the publisher with an empty token rather
+    // than connecting unauthenticated.
+    //
+    // Must be read close to process start, not lazily on first use: the
+    // injector only holds its side of the mapping open for a few seconds
+    // after LoadLibraryW returns (see its wmain) -- by the time a user
+    // manually flips the Diagnostics-tab sharing checkbox on, that window
+    // has long since closed and the mapping is gone.
+    //
+    // Shared by both g_share_token ("Kopt_ShareToken_<pid>") and the
+    // backend endpoint override ("Kopt_BackendEndpoint_<pid>") -- same
+    // shared-memory read, different mapping name prefix (see
+    // injector.cpp's publish_string_mapping doc comment for why this
+    // exists instead of a real environment variable).
+    std::wstring read_named_string(const wchar_t* name_prefix)
+    {
+        const std::wstring name = name_prefix + std::to_wstring(GetCurrentProcessId());
+        const HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name.c_str());
+        if (mapping == nullptr) return {}; // not published -- the injector wasn't given this value at inject time
+        const wchar_t* view = static_cast<const wchar_t*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0));
+        if (view == nullptr)
+        {
+            CloseHandle(mapping);
+            return {};
+        }
+        // The mapping is exactly (value.size() + 1) wchar_t's, written as
+        // one contiguous null-terminated buffer -- see
+        // publish_string_mapping in injector.cpp. wcsnlen bounds the scan
+        // to avoid depending on MapViewOfFile's own view size query (a
+        // second syscall); a hard cap here is simpler and both a
+        // legitimate JWT and a host:port endpoint are always far under it.
+        constexpr std::size_t max_length = 8192;
+        const std::size_t length = wcsnlen(view, max_length);
+        std::wstring value(view, length);
+        UnmapViewOfFile(view);
+        CloseHandle(mapping);
+        return value;
+    }
+
+    std::wstring read_share_token() { return read_named_string(L"Kopt_ShareToken_"); }
+    std::wstring read_backend_endpoint() { return read_named_string(L"Kopt_BackendEndpoint_"); }
+
     HMODULE g_module{};
     kopt::Settings g_settings;
     kopt::ArkRuntime g_runtime;
+    std::unique_ptr<kopt::Publisher> g_publisher = std::make_unique<kopt::Http3Publisher>();
+    std::chrono::steady_clock::time_point g_last_share_submit{};
+    // Whether g_publisher->start() has actually been called (not just
+    // whether the user wants share on) -- lets the start attempt keep
+    // quietly retrying, tick after tick, while share_enabled is true but
+    // server_ip isn't resolved yet (loading screen/main menu), without
+    // re-triggering on every single frame once it succeeds.
+    bool g_share_started{};
+    bool g_share_missing_token_logged{};
+    bool g_share_missing_server_ip_logged{};
+    // Populated once at worker() startup via read_share_token() -- see its
+    // doc comment for why this can't be read lazily on first use.
+    std::wstring g_share_token;
+    // Populated once at worker() startup via read_backend_endpoint().
+    // Empty means "no --backend override was given"; the tick-loop falls
+    // back to kopt_internal.ini's Share.Endpoint in that case (see
+    // g_settings.share_endpoint's default in config.hpp). Kept out of
+    // g_settings so g_settings.save() on unload never persists a
+    // per-launch override into the ini.
+    std::wstring g_backend_endpoint;
+    // Память о СВОИХ последних отправленных состояниях (не спамить
+    // неизменным) -- один экземпляр на весь процесс, пересоздание каждый
+    // тик обнулило бы память и превратило фильтр в no-op.
+    kopt::share::ChangeFilter g_share_filter;
+    // Буфер принятых батчей от других репортёров команды, с протуханием.
+    // ttl длиннее самого долгого keyframe-интервала источника (30 с) с
+    // запасом -- иначе собственный маячок отправителя будет считаться
+    // протухшим раньше, чем он успел повториться.
+    kopt::share::RemoteView g_remote_view{std::chrono::milliseconds(45000)};
+    // subscribe() зовёт колбэк с фонового read-потока Publisher'а, а
+    // g_remote_view читается с потока Present-хука -- без мьютекса это была
+    // бы гонка на одной и той же unordered_map.
+    std::mutex g_remote_view_mutex;
     kopt::Overlay g_overlay;
     kopt::InputState g_input;
     std::filesystem::path g_settings_path;
@@ -66,6 +158,7 @@ namespace
     IDXGISwapChain* g_game_swap_chain{};
     WNDPROC g_original_wndproc{};
     std::atomic<bool> g_stop{};
+    HANDLE g_unload_event{};
     std::atomic<unsigned> g_active_callbacks{};
     std::chrono::steady_clock::time_point g_last_frame{};
     std::atomic<bool> g_first_present_logged{};
@@ -120,6 +213,7 @@ namespace
     bool g_chams_rasterizer_valid{};
     std::uint32_t g_uploaded_chams_color{};
     PVOID g_exception_guard_handle{};
+    PVOID g_fatal_exception_logger_handle{};
     LPTOP_LEVEL_EXCEPTION_FILTER g_previous_exception_filter{};
     std::uintptr_t g_game_module_base{};
     alignas(8) std::uint64_t g_none_fname{};
@@ -282,6 +376,83 @@ namespace
         if (g_previous_exception_filter != nullptr &&
             g_previous_exception_filter != &unhandled_exception_filter)
             return g_previous_exception_filter(exception);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // fatal_exception_logger is a diagnostic tripwire, not a handler: it
+    // NEVER swallows anything (always returns EXCEPTION_CONTINUE_SEARCH),
+    // it only appends one log_line before whatever normally happens next
+    // happens anyway. Why this exists as a SEPARATE mechanism from
+    // unhandled_exception_filter below: a real crash on 2026-09-02 left no
+    // diagnostics/crash-* bundle at all -- kopt_internal.log just stops
+    // mid-session with no exception ever reaching that top-level filter.
+    // SetUnhandledExceptionFilter is a LAST-RESORT callback: Windows (and
+    // Wine's translation of a SIGSEGV into an SEH exception) only invokes
+    // it if nothing earlier in the frame-based __try/__except chain
+    // handled the exception AND the process isn't torn down through some
+    // other path (TerminateProcess, __fastfail, a raw signal Wine's
+    // page-fault translator failed to convert at all). A vectored handler
+    // registered here runs BEFORE any frame-based handler gets a chance to
+    // swallow or misreport the exception, so if the same crash happens
+    // again, comparing this line's timestamp/code against whether a
+    // diagnostics/crash-* bundle showed up afterward tells us which of
+    // those two things actually happened -- currently indistinguishable
+    // from kopt_internal.log alone.
+    std::mutex g_fatal_logger_mutex;
+    std::unordered_set<std::uintptr_t> g_logged_fatal_addresses;
+    // Caps memory AND (far more importantly) bounds how many times this can
+    // ever call log_line's synchronous open+write+close -- see the note
+    // below on why an unbounded version of this handler is a real, once-
+    // observed-in-practice perf bug, not a hypothetical.
+    constexpr std::size_t kMaxLoggedFatalAddresses = 256;
+
+    LONG CALLBACK fatal_exception_logger(EXCEPTION_POINTERS* exception)
+    {
+        if (exception == nullptr || exception->ExceptionRecord == nullptr)
+            return EXCEPTION_CONTINUE_SEARCH;
+        const DWORD code = exception->ExceptionRecord->ExceptionCode;
+        // Only the codes that mean "this thread is not going to recover
+        // normally" -- C++ throw/catch, .NET-style, and Wine's own
+        // internal bookkeeping exceptions (e.g. thread naming, debugger
+        // probes) raise plenty of harmless first-chance exceptions that
+        // would make this log unreadable if logged unconditionally.
+        switch (code)
+        {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_PRIV_INSTRUCTION:
+        case EXCEPTION_STACK_OVERFLOW:
+        case EXCEPTION_IN_PAGE_ERROR:
+        case EXCEPTION_DATATYPE_MISALIGNMENT:
+            break;
+        default:
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        const auto address = reinterpret_cast<std::uintptr_t>(exception->ExceptionRecord->ExceptionAddress);
+        // Log each distinct fault ADDRESS once, not every occurrence.
+        // Discovered the hard way: some other, unrelated first-chance
+        // ACCESS_VIOLATION-and-recover pattern elsewhere in ShooterGame/its
+        // D3D driver fires routinely (not the one specific, already-handled
+        // flight-death montage bug -- game_exception_guard resolves that
+        // one via EXCEPTION_CONTINUE_EXECUTION before dispatch even reaches
+        // this handler, since it's registered later and VEH's "first" list
+        // is LIFO). Logging unconditionally meant a synchronous
+        // open+append+close file write on every single occurrence -- if
+        // that fires many times per frame, THIS diagnostic tool was the
+        // periodic multi-second stutter, not the crash it exists to catch.
+        {
+            const std::lock_guard<std::mutex> lock(g_fatal_logger_mutex);
+            if (g_logged_fatal_addresses.size() >= kMaxLoggedFatalAddresses ||
+                !g_logged_fatal_addresses.insert(address).second)
+                return EXCEPTION_CONTINUE_SEARCH;
+        }
+        const auto offset = g_game_module_base != 0 && address >= g_game_module_base ?
+            address - g_game_module_base : 0;
+        log_line(std::format(
+            L"FATAL SEH FIRST-CHANCE code=0x{:08X} address=0x{:016X} game_module_offset=0x{:X} "
+            L"(if the process dies without a diagnostics/crash-* folder appearing after this line, "
+            L"the crash bypassed SetUnhandledExceptionFilter entirely -- see PROTON_LOG launch option)",
+            code, address, offset));
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -944,6 +1115,7 @@ namespace
     }
 
     bool capture_binding(int key, bool suppress_key_up);
+    void on_remote_batch(kopt::share::RemoteBatch batch);
 
     int sided_modifier_key(const int key, const LPARAM lparam)
     {
@@ -1136,6 +1308,28 @@ namespace
             if (message == WM_CHAR)
             {
                 g_input.queue_character(static_cast<wchar_t>(wparam));
+                return 0;
+            }
+            // Windows never synthesizes WM_CHAR for Ctrl+V -- text_input()
+            // only ever saw single keystrokes without this. API keys/JWTs
+            // are long enough that requiring the player to type one by
+            // hand (through a hooked, hidden-cursor overlay) isn't a real
+            // option, so the paste is read here, off the clipboard, on the
+            // keydown itself.
+            if (message == WM_KEYDOWN && wparam == 'V' && (GetKeyState(VK_CONTROL) & 0x8000) != 0)
+            {
+                if (OpenClipboard(window))
+                {
+                    if (const HANDLE clipboard_data = GetClipboardData(CF_UNICODETEXT))
+                    {
+                        if (const auto* text = static_cast<const wchar_t*>(GlobalLock(clipboard_data)))
+                        {
+                            g_input.queue_paste(std::wstring(text));
+                            GlobalUnlock(clipboard_data);
+                        }
+                    }
+                    CloseClipboard();
+                }
                 return 0;
             }
             switch (message)
@@ -1360,6 +1554,163 @@ namespace
                     g_settings.fov_override && !mounted_safe_mode &&
                         (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0,
                     g_settings.camera_fov);
+                // Кнопка Apply на Diagnostics-табе: g_publisher->start()
+                // захватывает токен в воркер-поток один раз (см. его
+                // собственный комментарий), внутренний reconnect-луп
+                // переиспользует именно эту копию вечно -- правка поля API
+                // key после того, как Share уже был включён, иначе ни на
+                // что не влияет, пока не переключить чекбокс туда-обратно.
+                // Сброс g_share_started здесь заставляет блок ниже
+                // перезапустить паблишер со свежим g_overlay.share_api_key().
+                if (g_overlay.consume_share_reconnect_request()) g_share_started = false;
+                // Живой старт/стоп: тумблер в интерфейсе (Diagnostics-таб)
+                // меняет g_settings.share_enabled в любой момент, а не
+                // только на загрузке payload'а -- без этой проверки
+                // включение шера в рантайме молчало бы до перезапуска.
+                if (g_settings.share_enabled && !g_share_started)
+                {
+                    // Diagnostics-таб держит API-ключ только в памяти
+                    // оверлея (Overlay::share_api_key_, не Settings -- см.
+                    // его doc comment в overlay.hpp), и годится ровно на то
+                    // место, куда иначе шёл бы g_share_token: тот же Bearer
+                    // проверяется на месте JWT бэкендом (core/account_auth.py
+                    // ::get_current_account). g_share_token берёт верх, если
+                    // оно есть (--share-token был передан при инжекте) --
+                    // ключ из меню существует именно на случай, когда его
+                    // не передали.
+                    const std::wstring& effective_token = !g_share_token.empty() ?
+                        g_share_token : g_overlay.share_api_key();
+                    // Same override precedence as the token above: a
+                    // --backend passed at inject time (see
+                    // publish_backend_endpoint's doc comment in
+                    // injector.cpp) beats kopt_internal.ini's Share.Endpoint
+                    // -- moving the relay to a VPS is then a launch
+                    // argument, not an ini edit or a rebuild.
+                    const std::wstring& effective_endpoint = !g_backend_endpoint.empty() ?
+                        g_backend_endpoint : g_settings.share_endpoint;
+                    if (effective_token.empty())
+                    {
+                        // g_share_token is fixed for the lifetime of this
+                        // process (read once at worker() startup) and the
+                        // menu's API key can still change on a later frame --
+                        // log once per empty spell, not once ever, so typing
+                        // a key in after this fires is still noticed.
+                        if (!g_share_missing_token_logged)
+                        {
+                            g_share_missing_token_logged = true;
+                            log_line(L"Share enabled in settings but no --share-token was given at inject time "
+                                L"and no API key is set on the Diagnostics tab; not starting publisher");
+                        }
+                    }
+                    // Gated on local_valid, not just "is some server_ip
+                    // available": g_settings.share_server_ip (the manual
+                    // ini fallback) is non-empty from the moment the ini
+                    // loads, long before ArkRuntime ever resolves a world --
+                    // checking effective_server_ip.empty() alone would have
+                    // used that stale fallback on the very first tick and
+                    // never given Snapshot::remote_server_ip (see
+                    // ArkRuntime::read_remote_server_ip) a chance to
+                    // populate at all. Waiting for local_valid first means
+                    // the ini value is only ever a genuine fallback -- used
+                    // when the live read actually failed post-spawn, not a
+                    // race winner against it. Confirmed live: without this,
+                    // the publisher started with the ini's placeholder
+                    // 10.99.0.1:7777 instead of the real, freshly-resolved
+                    // server address.
+                    else if (!snapshot.local_valid)
+                    {
+                        // Normal transient state during the loading screen/
+                        // main menu -- deliberately silent (no log_line
+                        // here), or this would write to disk every single
+                        // frame until the player spawns in.
+                    }
+                    else if (snapshot.remote_server_ip.empty() && g_settings.share_server_ip.empty())
+                    {
+                        // local_valid is true (world resolved) and the live
+                        // read still came back empty, with no ini fallback
+                        // configured either -- a genuine problem, not a
+                        // transient one, so unlike the branch above this is
+                        // worth a one-shot log.
+                        if (!g_share_missing_server_ip_logged)
+                        {
+                            g_share_missing_server_ip_logged = true;
+                            log_line(L"Share enabled but the server address could not be read from game memory "
+                                L"and Share.ServerIp is not set in kopt_internal.ini; not starting publisher");
+                        }
+                    }
+                    else
+                    {
+                        // Doesn't yet reconnect the publisher on a
+                        // mid-session server change (Obelisk travel to a
+                        // different server) -- start() only ever fires once
+                        // per share_enabled toggle; a real follow-up gap,
+                        // not silently ignored.
+                        const std::wstring effective_server_ip = !snapshot.remote_server_ip.empty() ?
+                            snapshot.remote_server_ip : g_settings.share_server_ip;
+                        log_line(std::format(L"Starting share publisher: {} (server={})",
+                            effective_endpoint, effective_server_ip));
+                        g_publisher->start(effective_endpoint, effective_token, effective_server_ip);
+                        g_publisher->subscribe(on_remote_batch);
+                        g_share_started = true;
+                    }
+                }
+                else if (!g_settings.share_enabled && g_share_started)
+                {
+                    g_publisher->stop();
+                    g_share_started = false;
+                }
+                if (g_settings.share_enabled &&
+                    std::chrono::duration<float, std::milli>(now - g_last_share_submit).count() >=
+                        g_settings.share_interval_ms)
+                {
+                    g_last_share_submit = now;
+                    // build_sightings() -- то же самое множество акторов,
+                    // что уже наполняет ESP этот кадр: источник правды здесь,
+                    // а не отдельный пересчёт "что показать по сети".
+                    std::vector<kopt::share::Sighting> all_sightings =
+                        kopt::share::build_sightings(snapshot.actors);
+                    // snapshot.actors never contains the local player itself
+                    // (ArkRuntime excludes it on purpose -- it's "what I see
+                    // around me", and self needs no ESP box); sharing exists
+                    // precisely so teammates see the sender's own position,
+                    // so it goes in separately here rather than in
+                    // build_sightings() itself.
+                    //
+                    // Gated on share_send_self_position independently of
+                    // everything else in this batch -- first instance of
+                    // "send" being its own axis from "scan"/"render" (see
+                    // Settings::share_send_self_position's own comment):
+                    // this flag only ever affects whether self goes out over
+                    // the wire, never local ESP (self was never drawn there
+                    // to begin with).
+                    if (g_settings.share_send_self_position)
+                    {
+                        if (const auto self = kopt::share::build_self_sighting(snapshot))
+                            all_sightings.push_back(*self);
+                    }
+                    // reporter identity/position -- independent axis from
+                    // share_send_self_position above (that one only gates
+                    // whether self appears as a drawable entity in this
+                    // same batch): dedup metadata for the receiving side's
+                    // ReporterFilter, sent whenever known regardless of
+                    // that setting. snapshot.local_stable_id/local_position
+                    // are already "sticky" (see their own doc comments in
+                    // runtime.hpp) -- a momentary !local_valid here just
+                    // means submit_sightings gets the last-known values,
+                    // not zeros, consistent with that documented behavior.
+                    g_publisher->submit_sightings(
+                        g_share_filter.filter(all_sightings, now),
+                        g_share_filter.collect_vanished(all_sightings),
+                        snapshot.local_stable_id, snapshot.local_position);
+                    if (!snapshot.alerts.empty())
+                    {
+                        std::vector<kopt::share::Notification> notifications;
+                        notifications.reserve(snapshot.alerts.size());
+                        for (const kopt::Alert& alert : snapshot.alerts)
+                            notifications.push_back(kopt::share::build_notification(alert));
+                        g_publisher->submit_notifications(std::move(notifications));
+                    }
+                }
                 if (snapshot.world_generation != g_logged_world_generation)
                 {
                     g_logged_world_generation = snapshot.world_generation;
@@ -1416,6 +1767,33 @@ namespace
                     log_line(std::format(L"Flight-death skeleton guard recovered {} invalid montage slot reference(s)",
                         guard_hits));
                 }
+                // No unconditional ensure_camera_hook() here any more: the camera
+                // tick is now installed and torn down by sync_camera_hook() above,
+                // which only keeps it while a feature actually needs it and drops
+                // it while mounted. Re-installing it every frame here would undo
+                // that teardown immediately.
+                g_overlay.set_share_connected(g_publisher->connected());
+                // Same override precedence as effective_endpoint above (a
+                // --backend at inject time beats kopt_internal.ini's
+                // Share.Endpoint) -- shown on the Diagnostics tab every
+                // frame, not just while a start attempt is being gated,
+                // so the menu always reflects what g_publisher is actually
+                // configured for, not the compile-time KOPT_DEFAULT_SHARE_ENDPOINT.
+                g_overlay.set_share_endpoint(!g_backend_endpoint.empty() ?
+                    g_backend_endpoint : g_settings.share_endpoint);
+                {
+                    // Copy under the lock, hand the plain vector to the
+                    // overlay -- it never touches g_remote_view_mutex
+                    // itself, same reasoning as set_share_connected's own
+                    // doc comment (overlay stays ignorant of the network/
+                    // threading side entirely).
+                    std::vector<kopt::share::RemoteBatch> visible_batches;
+                    {
+                        const std::lock_guard<std::mutex> lock(g_remote_view_mutex);
+                        visible_batches = g_remote_view.visible(now);
+                    }
+                    g_overlay.set_remote_sightings(std::move(visible_batches));
+                }
                 g_overlay.render(swap_chain, g_settings, g_runtime, g_input, g_settings_path);
                 if (g_settings.debug_panel)
                 {
@@ -1450,6 +1828,34 @@ namespace
     LRESULT CALLBACK dummy_wndproc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     {
         return DefWindowProcW(window, message, wparam, lparam);
+    }
+
+    // Confirmed by reproducing against a real launch: touching D3D11 at all
+    // -- even just D3D11CreateDeviceAndSwapChain for a throwaway probe
+    // device to read the vtable, below -- before Wine's DXVK/vkd3d backend
+    // has finished initializing corrupts state badly enough to crash the
+    // whole process a few seconds later (bad vtable pointer, garbage
+    // instruction at the "Present" slot). The payload loads via version.dll
+    // at process start, long before the engine creates its own device, so
+    // install_hooks() used to run immediately with no guard at all. d3d11/
+    // dxgi being loaded is necessary but not sufficient -- give DXVK a
+    // grace period afterward too, same margin ark_fun_tools' own working
+    // overlay uses for the same reason on this same game/Wine stack.
+    bool wait_for_render_ready()
+    {
+        for (int waited_ms = 0; !g_stop.load(std::memory_order_acquire); waited_ms += 250)
+        {
+            if (GetModuleHandleW(L"d3d11.dll") != nullptr && GetModuleHandleW(L"dxgi.dll") != nullptr)
+            {
+                log_line(L"d3d11/dxgi present; waiting for DXVK to settle before probing");
+                Sleep(2000);
+                return true;
+            }
+            if (waited_ms > 0 && waited_ms % 30000 == 0)
+                log_line(std::format(L"Still waiting for d3d11/dxgi to load ({} s)", waited_ms / 1000));
+            Sleep(250);
+        }
+        return false;
     }
 
     bool install_hooks()
@@ -1568,6 +1974,29 @@ namespace
         return std::filesystem::path(buffer).parent_path();
     }
 
+    // Приёмный колбэк подписки Publisher::subscribe -- вызывается на
+    // фоновом read-потоке реализации транспорта, поэтому: (1) не трогает
+    // ничего из hot-path Present-хука напрямую, только g_remote_view под
+    // мьютексом; (2) сам дедуплицирует по репортёру через ReporterFilter,
+    // не полагаясь на то, что сервер уже отфильтровал.
+    //
+    // ReporterFilter строится заново на каждый батч, а не кэшируется: оба
+    // его параметра (own_stable_id, радиус) могут поменяться между вызовами
+    // -- локальный игрок определяется не сразу после входа в игру, а радиус
+    // "esp_distance_m" настраивается вручную -- и сам объект тривиален
+    // (два поля), пересоздание стоит меньше, чем синхронизация кеша.
+    void on_remote_batch(kopt::share::RemoteBatch batch)
+    {
+        const auto& snapshot = g_runtime.snapshot();
+        if (!snapshot.local_valid) return; // своя позиция ещё не известна -- решить "рядом или нет" нечем
+        const kopt::share::ReporterFilter filter(snapshot.local_stable_id,
+            g_settings.esp_distance_m * 100.0F);
+        if (!filter.accept(batch.reporter_stable_id, batch.reporter_position, snapshot.local_position)) return;
+        batch.received_at = std::chrono::steady_clock::now();
+        const std::lock_guard<std::mutex> lock(g_remote_view_mutex);
+        g_remote_view.update(std::move(batch));
+    }
+
     DWORD WINAPI worker(void*)
     {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -1575,6 +2004,36 @@ namespace
         g_settings_path = directory / L"kopt_internal.ini";
         g_log_path = directory / L"kopt_internal.log";
         log_line(L"Payload worker started");
+        // Named per-PID so kopt_injector.exe's --unload can find it without
+        // already knowing kopt_payload.dll's remote base address. This
+        // REPLACES an earlier CreateRemoteThread-into-KoptRequestUnload's-
+        // own-address design: that worked for the very first injection of a
+        // session but was found to reliably time out (5s, every time) on a
+        // long-running Wine/Proton session that had already gone through a
+        // few inject/unload cycles -- CreateRemoteThread's raw start-address
+        // form is the well-worn, heavily-exercised path when the target is
+        // a builtin export (kernel32!LoadLibraryW, used by inject() above,
+        // which never showed this problem); jumping directly into an
+        // arbitrary address inside a third-party, non-builtin PE module is
+        // a far less exercised corner of Wine's thread creation, and this
+        // symptom (silent hang, not a crash, not a wrong-result) matches
+        // that being the less reliable path rather than a bug in
+        // KoptRequestUnload's own two-instruction body. A named event is
+        // the standard, boring, universally-supported way to signal into a
+        // process without running code at an address the caller had to
+        // guess at cross-process -- kernel32's CreateEvent/SetEvent are
+        // exactly as "builtin" as LoadLibraryW itself.
+        g_unload_event = CreateEventW(nullptr, TRUE, FALSE,
+            (L"Kopt_Unload_" + std::to_wstring(GetCurrentProcessId())).c_str());
+        // As early as possible -- see read_share_token's doc comment: the
+        // injector only holds its side of this mapping open for a few
+        // seconds after inject, this has to happen well within that window.
+        g_share_token = read_share_token();
+        g_backend_endpoint = read_backend_endpoint();
+        // Registered before everything else, including
+        // SetUnhandledExceptionFilter below -- see fatal_exception_logger's
+        // doc comment for why this exists as a second, earlier tripwire.
+        g_fatal_exception_logger_handle = AddVectoredExceptionHandler(1, fatal_exception_logger);
         g_previous_exception_filter = SetUnhandledExceptionFilter(&unhandled_exception_filter);
         g_settings.load(g_settings_path);
         g_settings.normalize();
@@ -1583,24 +2042,50 @@ namespace
         install_game_exception_guard();
         sync_hotkeys();
         g_menu_open.store(g_settings.menu_open, std::memory_order_release);
+        if (!wait_for_render_ready())
+        {
+            // Only reachable via KoptRequestUnload firing before the game
+            // ever got this far -- not an error, just an early exit.
+            log_line(L"Unload requested before render was ready; skipping hook install");
+            remove_game_exception_guard();
+            RemoveVectoredExceptionHandler(g_fatal_exception_logger_handle);
+            SetUnhandledExceptionFilter(g_previous_exception_filter);
+            if (g_unload_event != nullptr) CloseHandle(g_unload_event);
+            CoUninitialize();
+            FreeLibraryAndExitThread(g_module, 0);
+        }
         if (!install_hooks())
         {
             log_line(L"DXGI hook installation failed; unloading payload");
             MessageBoxW(nullptr, L"DXGI hook installation failed.", L"KOPT Internal", MB_ICONERROR | MB_OK);
             remove_game_exception_guard();
+            RemoveVectoredExceptionHandler(g_fatal_exception_logger_handle);
             SetUnhandledExceptionFilter(g_previous_exception_filter);
+            if (g_unload_event != nullptr) CloseHandle(g_unload_event);
             CoUninitialize();
             FreeLibraryAndExitThread(g_module, 1);
         }
         log_line(L"DXGI hooks installed; waiting for Present");
-        while (!g_stop.load()) Sleep(50);
+        while (!g_stop.load())
+        {
+            // g_unload_event may be null if CreateEventW failed (extremely
+            // unlikely) -- fall back to the plain poll so END/panic-hotkey
+            // local sets of g_stop still work even without it.
+            if (g_unload_event != nullptr && WaitForSingleObject(g_unload_event, 50) == WAIT_OBJECT_0)
+                g_stop.store(true);
+            else if (g_unload_event == nullptr)
+                Sleep(50);
+        }
         for (int attempt = 0; attempt < 25 && g_camera_slot != nullptr &&
             !g_unload_cleanup_completed.load(std::memory_order_acquire); ++attempt) Sleep(10);
         uninstall_hooks();
         while (g_active_callbacks.load() != 0) Sleep(1);
+        g_publisher->stop();
         g_runtime.restore_transient_state();
         remove_game_exception_guard();
+        RemoveVectoredExceptionHandler(g_fatal_exception_logger_handle);
         SetUnhandledExceptionFilter(g_previous_exception_filter);
+        if (g_unload_event != nullptr) CloseHandle(g_unload_event);
         g_settings.save(g_settings_path);
         CoUninitialize();
         FreeLibraryAndExitThread(g_module, 0);

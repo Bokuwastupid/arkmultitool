@@ -8,6 +8,20 @@
 #include <string>
 #include <vector>
 
+// Compile-time default for Settings::share_endpoint, overridable per build
+// via -DKOPT_DEFAULT_SHARE_ENDPOINT="host:port" (see CMakeLists.txt). This
+// is a DEFAULT only -- kopt_internal.ini's [Share] Endpoint and
+// kopt_injector.exe's --backend both still win over it at runtime (see
+// payload.cpp's effective_endpoint). Baking a specific relay address in
+// here means a text edit here + a rebuild, not just an ini edit, to
+// change it -- worth it only when handing pre-built binaries to people
+// who should never have to touch a flag or an ini file themselves.
+#ifndef KOPT_DEFAULT_SHARE_ENDPOINT
+#define KOPT_DEFAULT_SHARE_ENDPOINT "127.0.0.1:8443"
+#endif
+#define KOPT_WIDEN_(x) L##x
+#define KOPT_WIDEN(x) KOPT_WIDEN_(x)
+
 namespace kopt
 {
     struct Color
@@ -278,6 +292,61 @@ namespace kopt
 
         std::vector<std::int32_t> allied_teams;
         std::vector<FeatureBinding> feature_bindings;
+
+        // Шеринг sightings/notifications с остальной командой поверх
+        // голого QUIC (backend/backend_go/internal/quicserver -- НЕ
+        // HTTP/3, у Go-стороны нет HTTP-семантики вообще) -- see
+        // kopt::Publisher (publisher.hpp). Переименовано из relay_*: смысл
+        // поля расширился с "WS-релей игроков/дино" до общего
+        // двустороннего шеринга (структуры/турели/уведомления, QUIC-
+        // транспорт вместо WinHTTP WS), и держать старое имя значило бы
+        // врать о том, что внутри. Старые конфиги с секцией [Relay] молча
+        // получат значения по умолчанию (шер выключен) -- осознанная цена
+        // полной замены транспорта, не тихая потеря данных: умолчание
+        // безопасной стороны.
+        //
+        // Токен авторизации намеренно не поле здесь -- kopt_injector.exe
+        // --share-token публикует его в именованную shared-memory секцию
+        // (Kopt_ShareToken_<pid>), которую payload читает один раз при
+        // старте worker() (см. payload.cpp::read_share_token) -- та же
+        // политика "только в памяти", что и у токенов загрузчика, чтобы он
+        // никогда не оказался в этом текстовом ini.
+        //
+        // share_server_ip: тот же "launch parameter, не аккаунт-система"
+        // принцип, но это не секрет (адрес игрового сервера, не учётные
+        // данные) -- живёт в ini как есть, пока клиент не научится
+        // надёжно узнавать ip:port сам при каждом подключении к игре.
+        //
+        // Группа, в которую льётся шеринг, клиентом больше не передаётся
+        // вообще -- ни в ini, ни в хендшейке. Relay резолвит её сам по
+        // account_id (Postgres account.active_group_id, зеркалится в
+        // Redis) -- один account одновременно шарит ровно в одну группу,
+        // управляется через POST /v1/accounts/me/active-group на
+        // backend_python, не отсюда.
+        bool share_enabled{false};
+        std::wstring share_endpoint{KOPT_WIDEN(KOPT_DEFAULT_SHARE_ENDPOINT)};
+        std::wstring share_server_ip;
+        float share_interval_ms{1000.0F};
+
+        // Скан / отрисовка / отправка -- три независимые оси, не один флаг
+        // на функцию: то, что клиент прочитал из памяти игры (скан), то,
+        // что показывается в ESP-оверлее (отрисовка), и то, что уходит по
+        // сети тиммейтам (отправка) -- разные решения пользователя. Пример:
+        // просканировали сущность, отправить нужно, а рисовать локально --
+        // нет. Или наоборот: не отправлять координаты своих же тиммейтов,
+        // но продолжать видеть их в ESP.
+        //
+        // share_send_self_position -- первый экземпляр этого паттерна:
+        // включает/выключает ТОЛЬКО отправку собственных координат (см.
+        // share::build_self_sighting), на отрисовку никак не влияет (self
+        // и так никогда не попадает в snapshot.actors и не рисуется ESP).
+        // По умолчанию включено -- реальная настройка с дефолтом true, не
+        // хардкод "всегда отправлять": пока без своего тумблера в
+        // оверлее (Diagnostics-таб) -- это отдельный, более поздний шаг.
+        // Остальные оси (например, "не отправлять чужих игроков, но видеть
+        // их в ESP") добавляются позже тем же способом -- отдельное булево
+        // поле в [Share], без переделки существующих.
+        bool share_send_self_position{true};
 
         void normalize();
         bool load(const std::filesystem::path& path);

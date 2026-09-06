@@ -980,6 +980,20 @@ namespace kopt
             std::uint64_t linked_id{};
             if (read(snapshot_.local_character + offsets_.linked_player_data_id, linked_id) && linked_id != 0)
                 local_player_data_id_ = linked_id;
+            // Same fields read_actor() reads for every other player Actor,
+            // just off local_character -- keep "sticky" like local_stable_id
+            // (don't blank out a name/tribe we already have just because
+            // this one frame's read comes back empty, e.g. mid-respawn).
+            const std::wstring name = read_fstring(snapshot_.local_character + offsets_.player_name);
+            if (!name.empty()) snapshot_.local_name = name;
+            const std::wstring tribe = read_fstring(snapshot_.local_character + offsets_.tribe_name);
+            if (!tribe.empty()) snapshot_.local_tribe = tribe;
+            const std::uint64_t steam_id = read_player_steam_id(snapshot_.local_character);
+            if (steam_id != 0) snapshot_.local_steam_id = steam_id;
+        }
+        {
+            const std::wstring server_ip = read_remote_server_ip(world);
+            if (!server_ip.empty()) snapshot_.remote_server_ip = server_ip;
         }
         if (snapshot_.local_character == 0 && local_player_data_id_ != 0)
         {
@@ -988,6 +1002,7 @@ namespace kopt
             });
             if (local_actor != snapshot_.actors.end()) snapshot_.local_character = local_actor->address;
         }
+        snapshot_.local_stable_id = local_player_data_id_;
         read(world + offsets_.world_time_seconds, snapshot_.world_time);
         if (!std::isfinite(snapshot_.world_time) || snapshot_.world_time < 0.0) snapshot_.world_time = 0.0;
 
@@ -1358,14 +1373,16 @@ namespace kopt
 
         const bool ready = now >= alerts_ready_after_;
         bool play_sound{};
-        const auto append_alert = [&](Alert alert, const Vec3& contact_position = {},
+        const auto append_alert = [&](Alert alert,
             const float bearing_deg = std::numeric_limits<float>::quiet_NaN()) {
             alert.id = next_alert_id_++;
             alert.remaining_s = settings.alert_lifetime_s;
             // Every alert is also a journal entry. The on-screen alert expires in
-            // seconds; this copy is what is still here when you come back.
+            // seconds; this copy is what is still here when you come back. The
+            // contact's absolute position comes from the alert itself, which
+            // already carries it for the sharing channel.
             journal_.push_back({std::chrono::system_clock::now(), alert.kind, alert.title,
-                alert.name, alert.tribe, contact_position, snapshot_.world_generation,
+                alert.name, alert.tribe, alert.position, snapshot_.world_generation,
                 alert.distance_m, bearing_deg});
             const auto cutoff = std::chrono::system_clock::now() -
                 std::chrono::minutes(std::max(1, settings.journal_retention_min));
@@ -1400,8 +1417,8 @@ namespace kopt
             float bearing = std::atan2(to_actor_x, -to_actor_y) * radians_to_degrees;
             if (bearing < 0.0F) bearing += 360.0F;
             append_alert({0, kind, title, display_name, display_tribe,
-                distance(actor.position, snapshot_.local_position) / 100.0F, value, 0.0F},
-                actor.position, bearing);
+                distance(actor.position, snapshot_.local_position) / 100.0F, value, 0.0F,
+                actor.position}, bearing);
         };
 
         int enemy_group_count{};
@@ -1515,6 +1532,31 @@ namespace kopt
             PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
     }
 
+    std::uint64_t ArkRuntime::read_player_steam_id(const std::uintptr_t character_address) const
+    {
+        std::uintptr_t player_state{};
+        if (!read(character_address + offsets_.pawn_player_state, player_state) || player_state < 0x10000)
+            return 0; // владелец отключился -- пешка жива, PlayerState уже нет
+
+        std::uintptr_t unique_id_target{};
+        if (!read(player_state + offsets_.player_state_unique_id, unique_id_target) ||
+            unique_id_target < 0x10000)
+            return 0;
+
+        std::uint64_t steam_id{};
+        if (!read(unique_id_target + offsets_.unique_id_steam_id, steam_id)) return 0;
+
+        // SteamID64 individual-аккаунта всегда несёт один и тот же старший
+        // 32-битный префикс (universe=public, type=individual, instance=1)
+        // -- 0x01100001. Без этой проверки мусор из недочитанной/сдвинутой
+        // цепочки выглядел бы как правдоподобное число вместо явного нуля
+        // (Engineering Directive: fail closed, не эмитить правдоподобный на
+        // вид, но неверный результат).
+        constexpr std::uint64_t steam_id64_individual_prefix = 0x01100001ULL << 32;
+        if ((steam_id & 0xFFFFFFFF00000000ULL) != steam_id64_individual_prefix) return 0;
+        return steam_id;
+    }
+
     bool ArkRuntime::read_actor(const std::uintptr_t address, Actor& actor)
     {
         std::uintptr_t class_address{};
@@ -1545,7 +1587,10 @@ namespace kopt
         if (!std::isfinite(actor.last_render_time) || actor.last_render_time < 0.0)
             actor.last_render_time = 0.0;
         if (actor.kind == ActorKind::player)
+        {
             read(address + offsets_.linked_player_data_id, actor.linked_player_data_id);
+            actor.steam_id = read_player_steam_id(address);
+        }
         read(address + offsets_.targeting_team, actor.team);
         std::uintptr_t status{};
         if (read(address + offsets_.status_component, status) && status >= 0x10000)
@@ -1594,6 +1639,12 @@ namespace kopt
         {
             display = read_fstring(address + offsets_.descriptive_name);
             actor.tribe = read_fstring(address + offsets_.tribe_name);
+            // Непустое TamedName == приручено. Отдельное чтение, а не
+            // переиспользование display: display приходит из
+            // descriptive_name базового APrimalCharacter и у дикого тоже
+            // бывает непустым (это отображаемое имя существа, не признак
+            // владения) -- см. doc-комментарий Offsets::dino_tamed_name.
+            actor.tamed = !read_fstring(address + offsets_.dino_tamed_name).empty();
         }
         if (!display.empty()) actor.name = display;
         if (actor.kind == ActorKind::explorer_note)
@@ -2067,6 +2118,20 @@ namespace kopt
             [](const wchar_t c) { return std::iswcntrl(c) != 0; }), result.end());
         if (result.size() > 96) result.resize(96);
         return result;
+    }
+
+    std::wstring ArkRuntime::read_remote_server_ip(const std::uintptr_t world)
+    {
+        std::uintptr_t net_driver{};
+        std::uintptr_t connection{};
+        std::int32_t port{};
+        if (!read(world + offsets_.net_driver, net_driver) || net_driver < 0x10000 ||
+            !read(net_driver + offsets_.net_driver_server_connection, connection) || connection < 0x10000 ||
+            !read(connection + offsets_.connection_url_port, port) || port <= 0 || port > 65535)
+            return {};
+        const std::wstring host = read_fstring(connection + offsets_.connection_url_host, 128);
+        if (host.empty()) return {};
+        return host + L":" + std::to_wstring(port);
     }
 
     bool ArkRuntime::read_vec3(const std::uintptr_t address, Vec3& value) const
@@ -2663,14 +2728,32 @@ namespace kopt
             restore_freecam_near_clip();
             freecam_mouse_x_.store(0, std::memory_order_relaxed);
             freecam_mouse_y_.store(0, std::memory_order_relaxed);
-            if (freecam_was_enabled_ && freecam_pov_ >= 0x10000)
+            // freecam_pov_ was captured whenever freecam was last enabled or
+            // last saw the camera move (see the "moved > 1.0F" branch
+            // below) -- potentially many ticks before this exact frame. If
+            // the local pawn/controller got recreated in between (a
+            // respawn, a possession change -- this game's local-runtime
+            // invalidate/revalidate cycle is not rare, see
+            // read_local()'s invalidate_local()), the OLD camera manager
+            // freecam_pov_ points into may already be freed and reused for
+            // something else entirely. `pov` above is freshly recomputed
+            // from THIS frame's live camera_manager read -- only trust
+            // freecam_pov_ for the restore-write if it still matches that
+            // live address; a mismatch means we're not looking at the same
+            // manager we cached, and writing anyway is a stale-pointer
+            // write into arbitrary memory, not a real restore. (Found via
+            // a live crash: two ACCESS_VIOLATIONs at an address nowhere
+            // near this module, immediately after disabling freecam --
+            // consistent with corrupting unrelated heap memory here that
+            // only crashed later, elsewhere.)
+            if (freecam_was_enabled_ && freecam_pov_ >= 0x10000 && freecam_pov_ == pov)
             {
                 write(freecam_pov_, freecam_restore_position_);
                 write(freecam_pov_ + 0xC, freecam_restore_rotation_);
                 if (freecam_restore_fov_ >= 10.0F && freecam_restore_fov_ <= 170.0F)
                     write(freecam_pov_ + 0x28, freecam_restore_fov_);
-                freecam_pov_ = 0;
             }
+            freecam_pov_ = 0;
             freecam_was_enabled_ = false;
             return;
         }
@@ -2936,12 +3019,25 @@ namespace kopt
         restore_freecam_near_clip();
         restore_no_recoil();
         restore_no_sway();
+        // Same staleness risk as run_camera()'s disable branch (see its
+        // comment) -- freecam_pov_ may be many ticks old by the time
+        // unload gets here, and this is called from arbitrary unload
+        // timing, not a fresh per-frame tick, so the risk of the cached
+        // manager having been freed/replaced underneath us is if anything
+        // higher here. Re-derive the CURRENT camera pov the same way
+        // run_camera() does and only restore if it still matches.
         if (freecam_was_enabled_ && freecam_pov_ >= 0x10000)
         {
-            write(freecam_pov_, freecam_restore_position_);
-            write(freecam_pov_ + 0xC, freecam_restore_rotation_);
-            if (freecam_restore_fov_ >= 10.0F && freecam_restore_fov_ <= 170.0F)
-                write(freecam_pov_ + 0x28, freecam_restore_fov_);
+            std::uintptr_t manager{};
+            const auto pov = read(snapshot_.local_controller + offsets_.camera_manager, manager) && manager >= 0x10000 ?
+                manager + offsets_.camera_cache + offsets_.camera_pov : std::uintptr_t{};
+            if (freecam_pov_ == pov)
+            {
+                write(freecam_pov_, freecam_restore_position_);
+                write(freecam_pov_ + 0xC, freecam_restore_rotation_);
+                if (freecam_restore_fov_ >= 10.0F && freecam_restore_fov_ <= 170.0F)
+                    write(freecam_pov_ + 0x28, freecam_restore_fov_);
+            }
         }
         freecam_was_enabled_ = false;
         freecam_pov_ = 0;

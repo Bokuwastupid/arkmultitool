@@ -1,8 +1,12 @@
 # Native and managed build output
 /build/
 /build-msvc/
+/build-mingw/
 /output/
-/loader/dist/
+/loader_legasy/dist/
+
+# CodeGraph index
+/.codegraph/
 **/bin/
 **/obj/
 *.exe
@@ -20,6 +24,7 @@
 .env
 .env.*
 !.env.example
+!.env.sh.example
 *.db
 *.sqlite
 *.sqlite3
@@ -37,3 +42,7 @@ profiles/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Fetched by scripts/fetch-quic-deps.sh -- reproducible from nixpkgs, not
+# vendored into git (real binary blobs, ~16MB with OpenSSL's libcrypto).
+/third_party/quic-mingw64/

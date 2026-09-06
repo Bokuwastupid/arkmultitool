@@ -1,7 +1,12 @@
 param(
     [string]$Email = 'loader@local.test',
     [string]$Password = $env:KOPT_LOCAL_ADMIN_PASSWORD,
-    [int]$Port = 5087
+    [int]$Port = 5087,
+    # TODO(auth): drop once real login is wired back into the loader.
+    # Stamps every request as an admin dev user with no credential check --
+    # see Security/LocalDevAuthHandler.cs. Only takes effect because this
+    # script also sets ASPNETCORE_ENVIRONMENT=Development below.
+    [bool]$DevBypassAuth = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,6 +63,7 @@ $childEnvironment = [ordered]@{
     Security__HashPepper = $pepper
     Security__CapabilityPrivateKeyPkcs8 = $privateKey
     Security__DataProtectionPath = (Join-Path $runtime 'data-protection')
+    Security__DevBypassAuth = if ($DevBypassAuth) { 'true' } else { 'false' }
     KOPT_BOOTSTRAP_ADMIN_EMAIL = $Email
     KOPT_BOOTSTRAP_ADMIN_PASSWORD = $Password
     KOPT_BOOTSTRAP_SUBSCRIPTION_DAYS = '30'
@@ -93,6 +99,9 @@ do {
 } while ([DateTime]::UtcNow -lt $deadline)
 
 if ($null -eq $health -or $health.StatusCode -ne 200) { throw 'Local backend health check timed out.' }
+if ($DevBypassAuth) {
+    Write-Host "[KOPT] !!! Security:DevBypassAuth is ON -- no login required, every request is an admin. Local only. !!!" -ForegroundColor Yellow
+}
 Write-Host "[KOPT] Local backend ready: http://127.0.0.1:$Port"
 Write-Host "[KOPT] Loader login: $Email"
 Write-Host "[KOPT] Loader password: $Password"
