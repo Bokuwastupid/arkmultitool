@@ -8,7 +8,7 @@
 
 namespace
 {
-    constexpr std::uint32_t settings_schema_version = 21U;
+    constexpr std::uint32_t settings_schema_version = 24U;
 
     bool read_bool(const std::filesystem::path& path, const wchar_t* section,
         const wchar_t* key, const bool fallback)
@@ -56,6 +56,19 @@ namespace
         const wchar_t* key, const std::wstring& value)
     {
         WritePrivateProfileStringW(section, key, value.c_str(), path.c_str());
+    }
+
+    // A removed setting simply stops being read, so its key sits in every
+    // existing ini forever. Passing a null value deletes a key; a null key
+    // deletes the whole section.
+    void erase_key(const std::filesystem::path& path, const wchar_t* section, const wchar_t* key)
+    {
+        WritePrivateProfileStringW(section, key, nullptr, path.c_str());
+    }
+
+    void erase_section(const std::filesystem::path& path, const wchar_t* section)
+    {
+        WritePrivateProfileStringW(section, nullptr, nullptr, path.c_str());
     }
 
     void write_bool(const std::filesystem::path& path, const wchar_t* section,
@@ -154,6 +167,7 @@ namespace kopt
         esp_distance_m = std::clamp(esp_distance_m, 25.0F, 5000.0F);
         esp_detail_distance_m = std::clamp(esp_detail_distance_m, 10.0F, 5000.0F);
         drop_distance_m = std::clamp(drop_distance_m, 10.0F, 5000.0F);
+        horde_distance_m = std::clamp(horde_distance_m, 1000.0F, 100000.0F);
         refresh_interval_ms = std::clamp(refresh_interval_ms, 16.0F, 1000.0F);
         discovery_interval_ms = std::clamp(discovery_interval_ms, 250.0F, 5000.0F);
         discovery_budget_ms = std::clamp(discovery_budget_ms, 1.0F, 20.0F);
@@ -161,6 +175,7 @@ namespace kopt
         alert_noglin_radius_m = std::clamp(alert_noglin_radius_m, 10.0F, 1000.0F);
         alert_approach_speed_mps = std::clamp(alert_approach_speed_mps, 1.0F, 100.0F);
         alert_lifetime_s = std::clamp(alert_lifetime_s, 2.0F, 20.0F);
+        journal_retention_min = std::clamp(journal_retention_min, 5, 720);
         alert_cooldown_s = std::clamp(alert_cooldown_s, 2.0F, 120.0F);
         local_chams_style = std::clamp(local_chams_style, 0, 2);
         esp_box_style = std::clamp(esp_box_style, 0, 1);
@@ -186,6 +201,7 @@ namespace kopt
         radar_x = std::clamp(radar_x, 0.05F, 0.95F);
         radar_y = std::clamp(radar_y, 0.05F, 0.95F);
         structure_group_radius_m = std::clamp(structure_group_radius_m, 2.0F, 50.0F);
+        dino_group_radius_m = std::clamp(dino_group_radius_m, 2.0F, 50.0F);
         freecam_speed = std::clamp(freecam_speed, 100.0F, 10000.0F);
         freecam_sprint_multiplier = std::clamp(freecam_sprint_multiplier, 1.0F, 10.0F);
         freecam_vertical_multiplier = std::clamp(freecam_vertical_multiplier, 0.1F, 5.0F);
@@ -290,6 +306,13 @@ namespace kopt
         structure_esp = read_bool(path, L"ESP", L"Structures", structure_esp);
         turret_esp = read_bool(path, L"ESP", L"Turrets", turret_esp);
         drop_esp = read_bool(path, L"ESP", L"Drops", drop_esp);
+        horde_esp = read_bool(path, L"ESP", L"HordeEvents", horde_esp);
+        horde_reward_preview = read_bool(path, L"ESP", L"HordeRewardPreview", horde_reward_preview);
+        horde_esp = read_bool(path, L"OSD", L"Enabled", horde_esp);
+        horde_reward_preview = read_bool(path, L"OSD", L"RewardPreview", horde_reward_preview);
+        horde_map_alert = read_bool(path, L"OSD", L"MapAlert", horde_map_alert);
+        horde_distance_m = read_float(path, L"OSD", L"DistanceM", horde_distance_m);
+        explorer_note_esp = read_bool(path, L"ESP", L"ExplorerNotes", explorer_note_esp);
         death_cache_esp = read_bool(path, L"ESP", L"DeathCaches", death_cache_esp);
         player_item_cache_esp = read_bool(path, L"ESP", L"PlayerItemCaches", player_item_cache_esp);
         dino_item_cache_esp = read_bool(path, L"ESP", L"DinoItemCaches", dino_item_cache_esp);
@@ -309,6 +332,8 @@ namespace kopt
         show_radar = read_bool(path, L"ESP", L"Radar", show_radar);
         show_threat_panel = read_bool(path, L"ESP", L"ThreatPanel", show_threat_panel);
         structure_grouping = read_bool(path, L"ESP", L"StructureGrouping", structure_grouping);
+        dino_grouping = read_bool(path, L"ESP", L"DinoGrouping", dino_grouping);
+        esp_detailed_view = read_bool(path, L"ESP", L"DetailedView", esp_detailed_view);
         structure_whitelist_enabled = read_bool(path, L"ESP", L"StructureWhitelistEnabled",
             structure_whitelist_enabled);
         show_tracers = read_bool(path, L"ESP", L"Tracers", show_tracers);
@@ -380,6 +405,7 @@ namespace kopt
         radar_x = read_float(path, L"ESP", L"RadarX", radar_x);
         radar_y = read_float(path, L"ESP", L"RadarY", radar_y);
         structure_group_radius_m = read_float(path, L"ESP", L"StructureGroupRadiusM", structure_group_radius_m);
+        dino_group_radius_m = read_float(path, L"ESP", L"DinoGroupRadiusM", dino_group_radius_m);
         esp_distance_m = read_float(path, L"ESP", L"DistanceM", esp_distance_m);
         esp_detail_distance_m = read_float(path, L"ESP", L"DetailDistanceM", esp_detail_distance_m);
         drop_distance_m = read_float(path, L"ESP", L"DropDistanceM", drop_distance_m);
@@ -406,6 +432,8 @@ namespace kopt
         alert_noglin_radius_m = read_float(path, L"Alerts", L"NoglinRadiusM", alert_noglin_radius_m);
         alert_approach_speed_mps = read_float(path, L"Alerts", L"ApproachSpeedMps", alert_approach_speed_mps);
         alert_lifetime_s = read_float(path, L"Alerts", L"LifetimeS", alert_lifetime_s);
+        journal_retention_min = static_cast<std::int32_t>(
+            read_uint(path, L"Alerts", L"JournalRetentionMin", static_cast<std::uint32_t>(journal_retention_min)));
         alert_cooldown_s = read_float(path, L"Alerts", L"CooldownS", alert_cooldown_s);
 
         freecam = read_bool(path, L"Camera", L"Freecam", freecam);
@@ -420,7 +448,6 @@ namespace kopt
         no_sway = read_bool(path, L"Weapon", L"NoSway", no_sway);
         local_chams = read_bool(path, L"Chams", L"Local", local_chams);
         local_chams_style = static_cast<std::int32_t>(read_uint(path, L"Chams", L"LocalStyle", local_chams_style));
-        enemy_chams = read_bool(path, L"Chams", L"Enemies", enemy_chams);
         chams_players = read_bool(path, L"Chams", L"Players", chams_players);
         chams_dinos = read_bool(path, L"Chams", L"Dinos", chams_dinos);
         chams_distance_m = read_float(path, L"Chams", L"DistanceM", chams_distance_m);
@@ -439,6 +466,12 @@ namespace kopt
         torpor_color = read_color(path, L"Torpor", torpor_color);
         menu_accent_color = read_color(path, L"MenuAccent", menu_accent_color);
         local_chams_color = read_color(path, L"LocalChams", local_chams_color);
+        turret_color = read_color(path, L"Turret", turret_color);
+        drop_color = read_color(path, L"Drop", drop_color);
+        death_cache_color = read_color(path, L"DeathCache", death_cache_color);
+        horde_crate_color = read_color(path, L"HordeCrate", horde_crate_color);
+        element_node_color = read_color(path, L"ElementNode", element_node_color);
+        explorer_note_color = read_color(path, L"ExplorerNote", explorer_note_color);
 
         debug_panel = read_bool(path, L"Runtime", L"DebugPanel", debug_panel);
         aim_lab_recording = read_bool(path, L"Runtime", L"AimLabRecording", aim_lab_recording);
@@ -503,6 +536,14 @@ namespace kopt
             layout.hotkey_y = hotkey_list_y;
             layout.radar_x = radar_x;
             layout.radar_y = radar_y;
+        }
+        if (loaded_schema_version < 24U)
+        {
+            // Craft automation and enemy chams were removed; drop their leftovers
+            // instead of leaving dead keys in every existing configuration.
+            erase_section(path, L"CraftAutomation");
+            erase_key(path, L"Bindings", L"CraftRoute");
+            erase_key(path, L"Chams", L"Enemies");
         }
         normalize();
         if (loaded_schema_version < settings_schema_version)
@@ -578,6 +619,13 @@ namespace kopt
         write_bool(path, L"ESP", L"Structures", structure_esp);
         write_bool(path, L"ESP", L"Turrets", turret_esp);
         write_bool(path, L"ESP", L"Drops", drop_esp);
+        write_bool(path, L"ESP", L"HordeEvents", horde_esp);
+        write_bool(path, L"ESP", L"HordeRewardPreview", horde_reward_preview);
+        write_bool(path, L"OSD", L"Enabled", horde_esp);
+        write_bool(path, L"OSD", L"RewardPreview", horde_reward_preview);
+        write_bool(path, L"OSD", L"MapAlert", horde_map_alert);
+        write_float(path, L"OSD", L"DistanceM", horde_distance_m);
+        write_bool(path, L"ESP", L"ExplorerNotes", explorer_note_esp);
         write_bool(path, L"ESP", L"DeathCaches", death_cache_esp);
         write_bool(path, L"ESP", L"PlayerItemCaches", player_item_cache_esp);
         write_bool(path, L"ESP", L"DinoItemCaches", dino_item_cache_esp);
@@ -597,6 +645,8 @@ namespace kopt
         write_bool(path, L"ESP", L"Radar", show_radar);
         write_bool(path, L"ESP", L"ThreatPanel", show_threat_panel);
         write_bool(path, L"ESP", L"StructureGrouping", structure_grouping);
+        write_bool(path, L"ESP", L"DinoGrouping", dino_grouping);
+        write_bool(path, L"ESP", L"DetailedView", esp_detailed_view);
         write_bool(path, L"ESP", L"StructureWhitelistEnabled", structure_whitelist_enabled);
         write_bool(path, L"ESP", L"Tracers", show_tracers);
         write_bool(path, L"ESP", L"OffscreenArrows", offscreen_arrows);
@@ -664,6 +714,7 @@ namespace kopt
         write_float(path, L"ESP", L"RadarX", radar_x);
         write_float(path, L"ESP", L"RadarY", radar_y);
         write_float(path, L"ESP", L"StructureGroupRadiusM", structure_group_radius_m);
+        write_float(path, L"ESP", L"DinoGroupRadiusM", dino_group_radius_m);
         write_float(path, L"ESP", L"DistanceM", esp_distance_m);
         write_float(path, L"ESP", L"DetailDistanceM", esp_detail_distance_m);
         write_float(path, L"ESP", L"DropDistanceM", drop_distance_m);
@@ -690,6 +741,7 @@ namespace kopt
         write_float(path, L"Alerts", L"NoglinRadiusM", alert_noglin_radius_m);
         write_float(path, L"Alerts", L"ApproachSpeedMps", alert_approach_speed_mps);
         write_float(path, L"Alerts", L"LifetimeS", alert_lifetime_s);
+        write_uint(path, L"Alerts", L"JournalRetentionMin", static_cast<std::uint32_t>(journal_retention_min));
         write_float(path, L"Alerts", L"CooldownS", alert_cooldown_s);
 
         write_bool(path, L"Camera", L"Freecam", freecam);
@@ -704,7 +756,6 @@ namespace kopt
         write_bool(path, L"Weapon", L"NoSway", no_sway);
         write_bool(path, L"Chams", L"Local", local_chams);
         write_uint(path, L"Chams", L"LocalStyle", static_cast<std::uint32_t>(local_chams_style));
-        write_bool(path, L"Chams", L"Enemies", enemy_chams);
         write_bool(path, L"Chams", L"Players", chams_players);
         write_bool(path, L"Chams", L"Dinos", chams_dinos);
         write_float(path, L"Chams", L"DistanceM", chams_distance_m);
@@ -723,6 +774,12 @@ namespace kopt
         write_color(path, L"Torpor", torpor_color);
         write_color(path, L"MenuAccent", menu_accent_color);
         write_color(path, L"LocalChams", local_chams_color);
+        write_color(path, L"Turret", turret_color);
+        write_color(path, L"Drop", drop_color);
+        write_color(path, L"DeathCache", death_cache_color);
+        write_color(path, L"HordeCrate", horde_crate_color);
+        write_color(path, L"ElementNode", element_node_color);
+        write_color(path, L"ExplorerNote", explorer_note_color);
 
         write_bool(path, L"Runtime", L"DebugPanel", debug_panel);
         write_bool(path, L"Runtime", L"AimLabRecording", aim_lab_recording);

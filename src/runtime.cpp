@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <fstream>
 #include <limits>
@@ -150,6 +151,71 @@ namespace
         return angle;
     }
 
+    bool game_has_foreground()
+    {
+        const HWND window = GetForegroundWindow();
+        if (window == nullptr) return false;
+        DWORD process_id{};
+        GetWindowThreadProcessId(window, &process_id);
+        return process_id == GetCurrentProcessId();
+    }
+
+    void emit_virtual_key(const WORD key, const bool down)
+    {
+        INPUT input{};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = key;
+        input.ki.dwFlags = down ? 0U : KEYEVENTF_KEYUP;
+        SendInput(1, &input, sizeof(input));
+    }
+
+    void press_virtual_key(const WORD key)
+    {
+        emit_virtual_key(key, true);
+        emit_virtual_key(key, false);
+    }
+
+    bool click_normalized(const float normalized_x, const float normalized_y)
+    {
+        if (!game_has_foreground()) return false;
+        const HWND window = GetForegroundWindow();
+        RECT client{};
+        if (GetClientRect(window, &client) == FALSE || client.right <= client.left || client.bottom <= client.top)
+            return false;
+        POINT point{static_cast<LONG>(std::lround(static_cast<float>(client.right - client.left) * normalized_x)),
+            static_cast<LONG>(std::lround(static_cast<float>(client.bottom - client.top) * normalized_y))};
+        if (ClientToScreen(window, &point) == FALSE || SetCursorPos(point.x, point.y) == FALSE) return false;
+        INPUT inputs[2]{};
+        inputs[0].type = INPUT_MOUSE;
+        inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        inputs[1].type = INPUT_MOUSE;
+        inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        return SendInput(2, inputs, sizeof(INPUT)) == 2;
+    }
+
+    bool focus_and_type(const float x, const float y, const std::wstring& text)
+    {
+        if (!click_normalized(x, y)) return false;
+        emit_virtual_key(VK_CONTROL, true);
+        press_virtual_key('A');
+        emit_virtual_key(VK_CONTROL, false);
+        press_virtual_key(VK_BACK);
+        std::vector<INPUT> inputs;
+        inputs.reserve(text.size() * 2);
+        for (const wchar_t character : text)
+        {
+            INPUT down{};
+            down.type = INPUT_KEYBOARD;
+            down.ki.wScan = character;
+            down.ki.dwFlags = KEYEVENTF_UNICODE;
+            INPUT up = down;
+            up.ki.dwFlags |= KEYEVENTF_KEYUP;
+            inputs.push_back(down);
+            inputs.push_back(up);
+        }
+        return inputs.empty() || SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT)) == inputs.size();
+    }
+
     float intercept_time(const Vec3& relative, const Vec3& velocity, const float projectile_speed)
     {
         const float distance_squared = relative.x * relative.x + relative.y * relative.y + relative.z * relative.z;
@@ -210,6 +276,40 @@ namespace
         }
         std::replace(value.begin(), value.end(), L'_', L' ');
         return value.empty() ? L"Unknown" : value;
+    }
+
+    int horde_tier(const std::wstring& class_name)
+    {
+        const std::wstring name = lower(class_name);
+        if (name.find(L"legendary") != std::wstring::npos) return 4;
+        if (name.find(L"hard") != std::wstring::npos) return 3;
+        if (name.find(L"medium") != std::wstring::npos) return 2;
+        if (name.find(L"easy") != std::wstring::npos) return 1;
+        return 0;
+    }
+
+    const wchar_t* horde_tier_name(const int tier)
+    {
+        switch (tier)
+        {
+        case 1: return L"Easy / Blue";
+        case 2: return L"Medium / Yellow";
+        case 3: return L"Hard / Red";
+        case 4: return L"Legendary / Purple";
+        default: return L"Unknown tier";
+        }
+    }
+
+    const wchar_t* horde_pool_preview(const int tier)
+    {
+        switch (tier)
+        {
+        case 1: return L"OFFICIAL POOL: weapons, flak/ghillie/chitin, mid saddles, cryopod, enforcer, dust/shards";
+        case 2: return L"OFFICIAL POOL: fabricated guns, flak/riot, Rex/Quetz/Spino saddles, cryopod, polymer/shards";
+        case 3: return L"OFFICIAL POOL: Tek guns/sword, Mek, Tek/riot/hazard, Managarmr/Rex saddles, element resources";
+        case 4: return L"OFFICIAL POOL: high-quality Tek guns/sword, Mek, Tek/riot, endgame saddles, element";
+        default: return L"POOL: server-selected Horde reward table (mods may override)";
+        }
     }
 }
 
@@ -385,8 +485,25 @@ namespace kopt
         discovery_budget_ms_ = settings.discovery_budget_ms;
         read_local();
         const auto now = std::chrono::steady_clock::now();
+        // Full level/actor enumeration allocates and copies every streamed level's
+        // actor array before the time-sliced classifier even starts. Doing that from
+        // Present every few hundred milliseconds stalls camera-driven mount input.
+        // While mounted and the menu is closed, keep the last discovery set and only
+        // refresh its POD state at a bounded cadence. Opening the menu permits discovery;
+        // it also becomes immediately due again after dismount.
+        // The expensive half is discovery (enumerating and copying every streamed
+        // level's actor array); refreshing POD state of already-known actors is
+        // cheap. The old mounted path throttled both - it froze the actor set
+        // entirely and dropped refresh to 4 Hz - so riding meant new actors never
+        // appeared at all and known ones lagged badly behind. Keep refresh at the
+        // configured rate and only stretch discovery's cadence while mounted.
+        const bool mounted_performance_path = snapshot_.local_mounted;
+        const float live_refresh_interval_ms = settings.refresh_interval_ms;
+        const float discovery_interval_ms = mounted_performance_path && !settings.menu_open ?
+            settings.discovery_interval_ms * 2.0F : settings.discovery_interval_ms;
         const bool discovery_due = last_capture_.time_since_epoch().count() == 0 ||
-            std::chrono::duration<float, std::milli>(now - last_capture_).count() >= settings.discovery_interval_ms;
+            std::chrono::duration<float, std::milli>(now - last_capture_).count() >= discovery_interval_ms;
+        bool actor_state_refreshed{};
         if (discovery_due)
         {
             const auto discovery_started = std::chrono::steady_clock::now();
@@ -394,22 +511,28 @@ namespace kopt
             {
                 last_capture_ = now;
                 last_live_refresh_ = now;
+                actor_state_refreshed = true;
             }
             snapshot_.discovery_ms = std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - discovery_started).count();
         }
         else if (last_live_refresh_.time_since_epoch().count() == 0 ||
-            std::chrono::duration<float, std::milli>(now - last_live_refresh_).count() >= settings.refresh_interval_ms)
+            std::chrono::duration<float, std::milli>(now - last_live_refresh_).count() >=
+                live_refresh_interval_ms)
         {
             const auto refresh_started = std::chrono::steady_clock::now();
             const float elapsed = last_live_refresh_.time_since_epoch().count() == 0 ?
-                settings.refresh_interval_ms * 0.001F : std::chrono::duration<float>(now - last_live_refresh_).count();
+                live_refresh_interval_ms * 0.001F :
+                std::chrono::duration<float>(now - last_live_refresh_).count();
             refresh_known(std::clamp(elapsed, 0.0F, 0.5F));
             last_live_refresh_ = now;
+            actor_state_refreshed = true;
             snapshot_.refresh_ms = std::chrono::duration<float, std::milli>(
                 std::chrono::steady_clock::now() - refresh_started).count();
         }
-        update_alerts(settings);
+        if (actor_state_refreshed) sample_actor_history();
+        if (!mounted_performance_path || actor_state_refreshed)
+            update_alerts(settings);
         profiler_age_elapsed_ += std::clamp(delta_seconds, 0.0F, 0.10F);
         if (profiler_age_elapsed_ >= 1.0F)
         {
@@ -571,7 +694,8 @@ namespace kopt
         {
             actor.refresh_elapsed += delta_seconds;
             const float cadence = actor.kind == ActorKind::player || actor.kind == ActorKind::dino ? 0.0F :
-                actor.kind == ActorKind::drop || actor.kind == ActorKind::death_cache ? 0.10F : 0.50F;
+                actor.kind == ActorKind::drop || actor.kind == ActorKind::death_cache ||
+                actor.kind == ActorKind::horde_crate || actor.kind == ActorKind::element_node ? 0.10F : 0.50F;
             if (actor.refresh_elapsed < cadence) continue;
             const float attempted_elapsed = actor.refresh_elapsed;
             actor.refresh_elapsed = 0.0F;
@@ -651,6 +775,12 @@ namespace kopt
         actor.bone_count = 0;
         if (actor.kind == ActorKind::player && need_player_bones_)
             read_player_bones(actor.address, actor.position, actor);
+        if (actor.kind == ActorKind::horde_crate || actor.kind == ActorKind::element_node)
+        {
+            std::uintptr_t class_address{};
+            if (read(actor.address + offsets_.object_class, class_address) && class_address >= 0x10000)
+                read_horde_details(class_address, actor);
+        }
         return true;
     }
 
@@ -666,6 +796,8 @@ namespace kopt
         std::uintptr_t possessed_pawn{};
         std::uintptr_t root{};
         const auto invalidate_local = [&]() {
+            restore_managarmr_aim_offset();
+            restore_freecam_near_clip();
             if (observed_local_pawn_ != 0)
             {
                 observed_local_pawn_ = 0;
@@ -686,7 +818,11 @@ namespace kopt
             snapshot_.local_character = 0;
             snapshot_.camera_manager = 0;
             snapshot_.local_team = 0;
+            snapshot_.local_pawn_class_name.clear();
+            snapshot_.controller_pawn_class_name.clear();
             snapshot_.local_mounted = false;
+            snapshot_.controller_reports_riding = false;
+            snapshot_.managarmr_safe_aim = false;
         };
         if (!read(g_world_, world) || world < 0x10000)
         {
@@ -700,6 +836,7 @@ namespace kopt
                 snapshot_.actors.clear();
                 discovery_candidates_.clear();
                 discovery_cursor_ = 0;
+                actor_history_.clear();
                 abandon_chams();
                 abandon_alerts();
                 freecam_was_enabled_ = false;
@@ -751,6 +888,8 @@ namespace kopt
             discovery_candidates_.clear();
             discovery_cursor_ = 0;
             class_cache_.clear();
+            property_cache_.clear();
+            actor_history_.clear();
             local_player_data_id_ = 0;
             abandon_chams();
             abandon_alerts();
@@ -762,6 +901,8 @@ namespace kopt
         }
         if (pawn != observed_local_pawn_)
         {
+            restore_managarmr_aim_offset();
+            restore_freecam_near_clip();
             observed_local_pawn_ = pawn;
             local_pawn_ready_after_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
             locked_target_ = 0;
@@ -783,22 +924,57 @@ namespace kopt
         snapshot_.local_pawn = pawn;
         snapshot_.local_character = 0;
         read(controller + offsets_.controller_pawn, possessed_pawn);
-        read(pawn + offsets_.targeting_team, snapshot_.local_team);
+        snapshot_.local_pawn_class_name.clear();
+        snapshot_.controller_pawn_class_name.clear();
         snapshot_.local_mounted = false;
+        snapshot_.controller_reports_riding = false;
+        snapshot_.managarmr_safe_aim = false;
         std::uintptr_t pawn_class{};
+        ClassMeta pawn_meta{};
+        ClassMeta controller_pawn_meta{};
         if (read(pawn + offsets_.object_class, pawn_class) && pawn_class >= 0x10000)
-            snapshot_.local_mounted = class_meta(pawn_class).kind == ActorKind::dino;
-        if (!snapshot_.local_mounted)
         {
-            snapshot_.local_character = pawn;
+            pawn_meta = class_meta(pawn_class);
+            snapshot_.local_pawn_class_name = pawn_meta.name;
         }
-        else if (possessed_pawn >= 0x10000)
+        std::uintptr_t controller_pawn_class{};
+        if (possessed_pawn >= 0x10000 &&
+            read(possessed_pawn + offsets_.object_class, controller_pawn_class) && controller_pawn_class >= 0x10000)
         {
-            std::uintptr_t possessed_class{};
-            if (read(possessed_pawn + offsets_.object_class, possessed_class) && possessed_class >= 0x10000 &&
-                class_meta(possessed_class).kind == ActorKind::player)
+            controller_pawn_meta = class_meta(controller_pawn_class);
+            snapshot_.controller_pawn_class_name = controller_pawn_meta.name;
+        }
+
+        // Do not invoke gameplay methods from the render thread. Both possession slots
+        // are already available as POD UObject pointers, and the cached class metadata
+        // distinguishes player and dino pawns without touching engine state.
+        snapshot_.controller_reports_riding = controller_pawn_meta.kind == ActorKind::dino;
+        snapshot_.local_mounted = pawn_meta.kind == ActorKind::dino ||
+            snapshot_.controller_reports_riding;
+
+        if (snapshot_.local_mounted)
+        {
+            if (controller_pawn_meta.kind == ActorKind::dino && pawn_meta.kind != ActorKind::dino)
+            {
+                snapshot_.local_pawn = possessed_pawn;
+                snapshot_.local_pawn_class_name = controller_pawn_meta.name;
+                std::uintptr_t mounted_root{};
+                Vec3 mounted_position{};
+                if (read(possessed_pawn + offsets_.actor_root_component, mounted_root) && mounted_root >= 0x10000 &&
+                    read_vec3(mounted_root + offsets_.component_to_world + offsets_.transform_translation,
+                        mounted_position))
+                    snapshot_.local_position = mounted_position;
+            }
+            if (pawn_meta.kind == ActorKind::player) snapshot_.local_character = pawn;
+            else if (controller_pawn_meta.kind == ActorKind::player)
                 snapshot_.local_character = possessed_pawn;
+            const std::wstring pawn_name = lower(snapshot_.local_pawn_class_name);
+            snapshot_.managarmr_safe_aim = pawn_name.find(L"icejumper") != std::wstring::npos ||
+                pawn_name.find(L"managarmr") != std::wstring::npos ||
+                pawn_name.find(L"wyvern") != std::wstring::npos;
         }
+        else snapshot_.local_character = pawn;
+        read(snapshot_.local_pawn + offsets_.targeting_team, snapshot_.local_team);
         if (snapshot_.local_character >= 0x10000)
         {
             std::uint64_t linked_id{};
@@ -844,8 +1020,37 @@ namespace kopt
             snapshot_.camera.fov = fov;
             snapshot_.camera.valid = true;
         }
+        if (snapshot_.local_mounted)
+        {
+            // Mounted movement consumes camera/control state directly. Keep every
+            // unrelated camera-tick feature out of this path; only the verified
+            // Managarmr/Wyvern aim route may run. Cleanup undoes inherited rider state.
+            restore_freecam_near_clip();
+            restore_no_recoil();
+            restore_no_sway();
+            restore_chams();
+            if (std::chrono::steady_clock::now() < local_pawn_ready_after_)
+            {
+                restore_managarmr_aim_offset();
+                snapshot_.aim_active = false;
+                snapshot_.player_aim_active = false;
+                snapshot_.dino_aim_active = false;
+                snapshot_.aim_target = 0;
+                locked_target_ = 0;
+                locked_target_occluded_seconds_ = 0.0F;
+                snapshot_.aim_debug = {};
+                snapshot_.aim_debug.world_time = snapshot_.world_time;
+            }
+            else
+            {
+                run_aim(settings, delta_seconds);
+            }
+            record_aim_sample(settings, delta_seconds);
+            return;
+        }
         if (std::chrono::steady_clock::now() < local_pawn_ready_after_)
         {
+            restore_managarmr_aim_offset();
             snapshot_.aim_active = false;
             snapshot_.aim_target = 0;
             locked_target_ = 0;
@@ -862,6 +1067,53 @@ namespace kopt
         run_aim(settings, delta_seconds);
         record_aim_sample(settings, delta_seconds);
         update_chams(settings);
+    }
+
+    const ArkRuntime::ActorHistory* ArkRuntime::actor_history(const std::uintptr_t address) const
+    {
+        const auto entry = actor_history_.find(address);
+        return entry == actor_history_.end() ? nullptr : &entry->second;
+    }
+
+    void ArkRuntime::sample_actor_history()
+    {
+        // Half a second between samples: a 64-slot ring then spans ~32 s, which is
+        // long enough to measure a torpor slope and to draw a useful trail without
+        // sampling every refresh.
+        constexpr float sample_interval_ms = 500.0F;
+        const auto now = std::chrono::steady_clock::now();
+        if (last_history_sample_.time_since_epoch().count() != 0 &&
+            std::chrono::duration<float, std::milli>(now - last_history_sample_).count() < sample_interval_ms)
+            return;
+        last_history_sample_ = now;
+
+        for (const Actor& actor : snapshot_.actors)
+        {
+            // Players (trails, contact log) and anything sedated (wake timer).
+            // Deliberately not every tracked actor - that is thousands of entries
+            // per world for features that would never read them.
+            const bool wanted = actor.kind == ActorKind::player ||
+                (actor.max_torpor > 0.0F && actor.torpor > 0.0F);
+            if (!wanted || actor.stale_seconds > 0.0F) continue;
+            ActorHistory& history = actor_history_[actor.address];
+            if (history.world_generation != snapshot_.world_generation)
+            {
+                history = {};
+                history.world_generation = snapshot_.world_generation;
+            }
+            history.push({snapshot_.world_time, actor.position, actor.torpor, actor.health});
+        }
+
+        // Drop history for actors that are gone or went stale, so a long session
+        // does not accumulate entries for everything ever seen.
+        if (actor_history_.size() > snapshot_.actors.size() + 64)
+        {
+            std::unordered_set<std::uintptr_t> live;
+            live.reserve(snapshot_.actors.size());
+            for (const Actor& actor : snapshot_.actors)
+                if (actor.stale_seconds <= 0.0F) live.insert(actor.address);
+            std::erase_if(actor_history_, [&](const auto& entry) { return !live.contains(entry.first); });
+        }
     }
 
     void ArkRuntime::update_chams(const Settings& settings)
@@ -1106,9 +1358,23 @@ namespace kopt
 
         const bool ready = now >= alerts_ready_after_;
         bool play_sound{};
-        const auto append_alert = [&](Alert alert) {
+        const auto append_alert = [&](Alert alert, const Vec3& contact_position = {},
+            const float bearing_deg = std::numeric_limits<float>::quiet_NaN()) {
             alert.id = next_alert_id_++;
             alert.remaining_s = settings.alert_lifetime_s;
+            // Every alert is also a journal entry. The on-screen alert expires in
+            // seconds; this copy is what is still here when you come back.
+            journal_.push_back({std::chrono::system_clock::now(), alert.kind, alert.title,
+                alert.name, alert.tribe, contact_position, snapshot_.world_generation,
+                alert.distance_m, bearing_deg});
+            const auto cutoff = std::chrono::system_clock::now() -
+                std::chrono::minutes(std::max(1, settings.journal_retention_min));
+            std::erase_if(journal_, [&](const JournalEntry& entry) { return entry.time < cutoff; });
+            // Hard cap as well, so a very noisy hour cannot grow without bound.
+            constexpr std::size_t journal_cap = 512;
+            if (journal_.size() > journal_cap)
+                journal_.erase(journal_.begin(), journal_.begin() +
+                    static_cast<std::ptrdiff_t>(journal_.size() - journal_cap));
             if (active_alerts_.size() >= 4) active_alerts_.erase(active_alerts_.begin());
             active_alerts_.push_back({std::move(alert),
                 now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -1127,8 +1393,15 @@ namespace kopt
                 (actor.kind == ActorKind::player ? L"Unknown player" : L"Unknown actor");
             const std::wstring display_tribe = !actor.tribe.empty() ? actor.tribe :
                 (actor.kind == ActorKind::player ? L"Unknown tribe" : L"");
+            // Bearing from the player to the contact. ARK's map north is -Y, so
+            // that axis is treated as 0 degrees and the angle grows clockwise.
+            const float to_actor_x = actor.position.x - snapshot_.local_position.x;
+            const float to_actor_y = actor.position.y - snapshot_.local_position.y;
+            float bearing = std::atan2(to_actor_x, -to_actor_y) * radians_to_degrees;
+            if (bearing < 0.0F) bearing += 360.0F;
             append_alert({0, kind, title, display_name, display_tribe,
-                distance(actor.position, snapshot_.local_position) / 100.0F, value, 0.0F});
+                distance(actor.position, snapshot_.local_position) / 100.0F, value, 0.0F},
+                actor.position, bearing);
         };
 
         int enemy_group_count{};
@@ -1323,6 +1596,13 @@ namespace kopt
             actor.tribe = read_fstring(address + offsets_.tribe_name);
         }
         if (!display.empty()) actor.name = display;
+        if (actor.kind == ActorKind::explorer_note)
+        {
+            std::wstring note_name = friendly_name(metadata.name);
+            const std::wstring prefix = L"ExplorerChest ";
+            if (note_name.starts_with(prefix)) note_name.erase(0, prefix.size());
+            actor.name = L"Explorer Note: " + note_name;
+        }
         if (actor.turret)
         {
             std::int32_t ammo{};
@@ -1351,11 +1631,199 @@ namespace kopt
                     actor.quantity = quantity;
             }
         }
+        if (actor.kind == ActorKind::horde_crate || actor.kind == ActorKind::element_node)
+            read_horde_details(class_address, actor);
         if (actor.kind == ActorKind::player && need_player_bones_)
             read_player_bones(address, actor.position, actor);
         if (actor.kind == ActorKind::player && (need_equipment_ || need_held_items_))
             read_player_equipment(address, actor);
         return true;
+    }
+
+    ArkRuntime::PropertyMeta ArkRuntime::property_meta(const std::uintptr_t class_address,
+        const wchar_t* property_name)
+    {
+        if (class_address < 0x10000 || property_name == nullptr || *property_name == L'\0') return {};
+        const std::wstring wanted = lower(property_name);
+        const std::wstring key = std::to_wstring(class_address) + L":" + wanted;
+        if (const auto cached = property_cache_.find(key); cached != property_cache_.end())
+            return cached->second;
+
+        PropertyMeta result{};
+        std::uintptr_t current = class_address;
+        std::unordered_set<std::uintptr_t> visited_classes;
+        for (int depth = 0; depth < 64 && current >= 0x10000 && visited_classes.insert(current).second; ++depth)
+        {
+            std::uintptr_t field{};
+            read(current + 0x38, field); // UStruct::Children
+            std::unordered_set<std::uintptr_t> visited_fields;
+            for (int index = 0; index < 4096 && field >= 0x10000 && visited_fields.insert(field).second; ++index)
+            {
+                if (lower(object_name(field)) == wanted)
+                {
+                    std::int32_t offset{};
+                    if (read(field + 0x4C, offset) && offset >= 0 && offset <= 0x10000)
+                        result = {field, offset};
+                    property_cache_.emplace(key, result);
+                    return result;
+                }
+                std::uintptr_t next{};
+                if (!read(field + 0x28, next)) break; // UField::Next
+                field = next;
+            }
+            if (!read(current + offsets_.super_struct, current)) break;
+        }
+        property_cache_.emplace(key, result);
+        return result;
+    }
+
+    bool ArkRuntime::read_bool_property(const std::uintptr_t instance, const std::uintptr_t class_address,
+        const wchar_t* property_name, bool& value)
+    {
+        const PropertyMeta property = property_meta(class_address, property_name);
+        if (property.field < 0x10000 || property.offset < 0) return false;
+        std::uint8_t byte_offset{}, byte_mask{}, raw{};
+        if (!read(property.field + 0x71, byte_offset) || !read(property.field + 0x72, byte_mask) || byte_mask == 0 ||
+            !read(instance + static_cast<std::uintptr_t>(property.offset) + byte_offset, raw)) return false;
+        value = (raw & byte_mask) != 0;
+        return true;
+    }
+
+    void ArkRuntime::read_horde_details(const std::uintptr_t class_address, Actor& actor)
+    {
+        actor.horde_tier = horde_tier(actor.class_name);
+        actor.horde_wave = -1;
+        actor.element_reward = -1;
+        actor.reward_exact = false;
+        actor.reward_preview.clear();
+        actor.name = actor.kind == ActorKind::element_node ? L"Element Node" : L"Horde OSD";
+        actor.name += L" (" + std::wstring(horde_tier_name(actor.horde_tier)) + L")";
+
+        const auto read_integer = [&](const wchar_t* name, std::int32_t& value) {
+            const PropertyMeta property = property_meta(class_address, name);
+            if (property.offset < 0 || property.field < 0x10000) return false;
+            std::uintptr_t property_class{};
+            std::wstring type;
+            if (read(property.field + offsets_.object_class, property_class) && property_class >= 0x10000)
+                type = lower(object_name(property_class));
+            if (type.find(L"doubleproperty") != std::wstring::npos)
+            {
+                double candidate{};
+                if (!read(actor.address + static_cast<std::uintptr_t>(property.offset), candidate) ||
+                    !std::isfinite(candidate) || candidate < 0.0 || candidate > 100'000'000.0) return false;
+                value = static_cast<std::int32_t>(std::llround(candidate));
+                return true;
+            }
+            if (type.find(L"floatproperty") != std::wstring::npos)
+            {
+                float candidate{};
+                if (!read(actor.address + static_cast<std::uintptr_t>(property.offset), candidate) ||
+                    !std::isfinite(candidate) || candidate < 0.0F || candidate > 100'000'000.0F) return false;
+                value = static_cast<std::int32_t>(std::lround(candidate));
+                return true;
+            }
+            std::int32_t candidate{};
+            if (!read(actor.address + static_cast<std::uintptr_t>(property.offset), candidate) ||
+                candidate < 0 || candidate > 100'000'000) return false;
+            value = candidate;
+            return true;
+        };
+        std::int32_t wave{};
+        if (read_integer(L"CurrentWave", wave) && wave <= 100) actor.horde_wave = wave;
+
+        if (actor.kind == ActorKind::element_node)
+        {
+            static constexpr std::array<const wchar_t*, 3> totals{
+                L"TotalElementToGive", L"TotalMainElement", L"ActualSecondaryElement"};
+            std::int32_t total{};
+            for (const wchar_t* property : totals)
+            {
+                std::int32_t value{};
+                if (read_integer(property, value) && value > 0) total = std::max(total, value);
+            }
+            if (total > 0)
+            {
+                actor.element_reward = total;
+                actor.reward_exact = true;
+                actor.reward_preview = L"ELEMENT REWARD: " + std::to_wstring(total) + L" (replicated)";
+            }
+            else
+            {
+                std::int32_t minimum{}, maximum{};
+                const bool has_min = read_integer(L"MinAmtOfElementToGive", minimum) && minimum > 0;
+                const bool has_max = read_integer(L"MaxAmtOfElementToGive", maximum) && maximum >= minimum;
+                if (has_min && has_max)
+                    actor.reward_preview = L"ELEMENT RANGE: " + std::to_wstring(minimum) + L"-" + std::to_wstring(maximum);
+                else actor.reward_preview = L"ELEMENT RNG: pending on server";
+            }
+            return;
+        }
+
+        // The crate's container is not necessarily reflected under the name the
+        // character path uses, so try the known spellings and record which one
+        // resolved - "pending on server" was previously indistinguishable from
+        // "we looked up the wrong property".
+        static constexpr std::array<const wchar_t*, 4> inventory_properties{
+            L"MyInventoryComponent", L"MyInventory", L"InventoryComponent", L"MyItemContainer"};
+        std::uintptr_t inventory{};
+        const wchar_t* resolved_property = L"none";
+        std::int32_t resolved_offset = -1;
+        for (const wchar_t* candidate : inventory_properties)
+        {
+            const PropertyMeta property = property_meta(class_address, candidate);
+            if (property.offset < 0) continue;
+            std::uintptr_t value{};
+            if (!read(actor.address + static_cast<std::uintptr_t>(property.offset), value) ||
+                value < 0x10000) continue;
+            inventory = value;
+            resolved_property = candidate;
+            resolved_offset = property.offset;
+            break;
+        }
+        std::uintptr_t item_data{};
+        std::int32_t item_count{};
+        const bool array_read = inventory >= 0x10000 &&
+            read(inventory + 0x128, item_data) && read(inventory + 0x130, item_count);
+        const auto hex = [](const std::uintptr_t value) {
+            wchar_t buffer[32]{};
+            std::swprintf(buffer, std::size(buffer), L"0x%llX", static_cast<unsigned long long>(value));
+            return std::wstring(buffer);
+        };
+        actor.reward_diagnostic = std::wstring(L"prop=") + resolved_property +
+            L" off=" + std::to_wstring(resolved_offset) +
+            L" inv=" + hex(inventory) +
+            L" items=" + hex(item_data) +
+            L" count=" + std::to_wstring(item_count);
+        if (array_read && item_data >= 0x10000 && item_count > 0 && item_count <= 256)
+        {
+            std::wstring preview = L"EXACT LOOT (" + std::to_wstring(item_count) + L" slots)";
+            int displayed{};
+            for (int index = 0; index < item_count; ++index)
+            {
+                std::uintptr_t item{}, item_class{};
+                if (!read(item_data + static_cast<std::uintptr_t>(index) * sizeof(std::uintptr_t), item) ||
+                    item < 0x10000 || !read(item + offsets_.object_class, item_class) || item_class < 0x10000) continue;
+                std::wstring name = read_fstring(item + 0x328);
+                if (name.empty()) name = friendly_name(object_name(item_class));
+                std::int32_t quantity{1};
+                if (!read(item + 0x5F8, quantity) || quantity <= 0 || quantity > 1'000'000'000) quantity = 1;
+                bool blueprint{};
+                read_bool_property(item, item_class, L"bIsBlueprint", blueprint);
+                preview += L"\n" + std::to_wstring(displayed + 1) + L". ";
+                if (blueprint) preview += L"[BP] ";
+                preview += name;
+                if (quantity > 1) preview += L" x" + std::to_wstring(quantity);
+                ++displayed;
+            }
+            if (displayed > 0)
+            {
+                actor.reward_preview = std::move(preview);
+                actor.reward_exact = true;
+                return;
+            }
+        }
+        actor.reward_preview = L"LOOT RNG: pending on server\n";
+        actor.reward_preview += horde_pool_preview(actor.horde_tier);
     }
 
     bool ArkRuntime::read_player_bones(const std::uintptr_t address, const Vec3& actor_position, Actor& actor)
@@ -1504,7 +1972,17 @@ namespace kopt
         }
 
         const std::wstring class_lower = lower(result.name);
-        if (class_lower.find(L"deathitemcache") != std::wstring::npos ||
+        if (class_lower.find(L"horde") != std::wstring::npos &&
+            class_lower.find(L"supplycrate") != std::wstring::npos)
+            result.kind = ActorKind::horde_crate;
+        else if (class_lower.find(L"horde") != std::wstring::npos &&
+            class_lower.find(L"elementnode") != std::wstring::npos)
+            result.kind = ActorKind::element_node;
+        else if (class_lower.find(L"explorerchest") != std::wstring::npos ||
+            class_lower.find(L"explorernote") != std::wstring::npos ||
+            class_lower.find(L"explorer_note") != std::wstring::npos)
+            result.kind = ActorKind::explorer_note;
+        else if (class_lower.find(L"deathitemcache") != std::wstring::npos ||
             class_lower.find(L"deathcache") != std::wstring::npos)
             result.kind = ActorKind::death_cache;
         else if (class_lower.find(L"droppeditem") != std::wstring::npos ||
@@ -1659,8 +2137,15 @@ namespace kopt
         snapshot_.player_aim_active = false;
         snapshot_.dino_aim_active = false;
         snapshot_.aim_target = 0;
-        const bool player_aim_enable_changed = last_player_aim_ != settings.player_aim;
-        const bool dino_aim_enable_changed = last_dino_aim_ != settings.dino_aim;
+        // These switches select target classes. Mounted execution is permitted only
+        // for Managarmr/Wyvern, whose aim-offset route never writes the controller
+        // rotation consumed by mount steering. CurrentAimOffsetsRotation belongs to
+        // their shared APrimalDinoCharacter base.
+        const bool aim_route_available = !snapshot_.local_mounted || snapshot_.managarmr_safe_aim;
+        const bool player_aim_enabled = settings.player_aim && aim_route_available;
+        const bool dino_aim_enabled = settings.dino_aim && aim_route_available;
+        const bool player_aim_enable_changed = last_player_aim_ != player_aim_enabled;
+        const bool dino_aim_enable_changed = last_dino_aim_ != dino_aim_enabled;
         const bool menu_just_closed = last_menu_open_ && !settings.menu_open;
         if (last_aim_key_ != settings.aim_key || last_aim_activation_mode_ != settings.aim_activation_mode ||
             player_aim_enable_changed || menu_just_closed)
@@ -1668,7 +2153,7 @@ namespace kopt
             last_aim_key_ = settings.aim_key;
             last_aim_activation_mode_ = settings.aim_activation_mode;
             aim_key_was_down_ = false;
-            aim_key_armed_ = false;
+            aim_key_armed_ = !menu_just_closed;
             aim_toggle_active_ = false;
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
@@ -1680,13 +2165,13 @@ namespace kopt
             last_dino_aim_key_ = settings.dino_aim_key;
             last_dino_aim_activation_mode_ = settings.dino_aim_activation_mode;
             dino_aim_key_was_down_ = false;
-            dino_aim_key_armed_ = false;
+            dino_aim_key_armed_ = !menu_just_closed;
             dino_aim_toggle_active_ = false;
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
         }
-        last_player_aim_ = settings.player_aim;
-        last_dino_aim_ = settings.dino_aim;
+        last_player_aim_ = player_aim_enabled;
+        last_dino_aim_ = dino_aim_enabled;
         last_menu_open_ = settings.menu_open;
         DWORD foreground_process{};
         const HWND foreground_window = GetForegroundWindow();
@@ -1703,6 +2188,7 @@ namespace kopt
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
             snapshot_.aim_armed = false;
+            restore_managarmr_aim_offset();
             return;
         }
         const auto activation = [](const bool enabled, const std::uint32_t key, const std::int32_t mode,
@@ -1715,21 +2201,21 @@ namespace kopt
             if (mode == 1 && pressed) toggle_active = !toggle_active;
             return mode == 0 ? down && armed : mode == 1 ? toggle_active : true;
         };
-        const bool player_activated = activation(settings.player_aim, settings.aim_key,
+        const bool player_activated = activation(player_aim_enabled, settings.aim_key,
             settings.aim_activation_mode, aim_key_was_down_, aim_key_armed_, aim_toggle_active_);
-        const bool dino_activated = activation(settings.dino_aim, settings.dino_aim_key,
+        const bool dino_activated = activation(dino_aim_enabled, settings.dino_aim_key,
             settings.dino_aim_activation_mode, dino_aim_key_was_down_, dino_aim_key_armed_,
             dino_aim_toggle_active_);
         snapshot_.player_aim_active = player_activated;
         snapshot_.dino_aim_active = dino_activated;
-        snapshot_.aim_armed = (settings.player_aim && aim_key_armed_) ||
-            (settings.dino_aim && dino_aim_key_armed_);
-        if ((!settings.player_aim && !settings.dino_aim) || settings.menu_open || !snapshot_.local_valid ||
+        snapshot_.aim_armed = (player_aim_enabled && aim_key_armed_) ||
+            (dino_aim_enabled && dino_aim_key_armed_);
+        if ((!player_aim_enabled && !dino_aim_enabled) || settings.menu_open || !snapshot_.local_valid ||
             !snapshot_.camera.valid || (!player_activated && !dino_activated))
         {
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
-            if ((!settings.player_aim && !settings.dino_aim) || settings.menu_open || !snapshot_.local_valid)
+            if ((!player_aim_enabled && !dino_aim_enabled) || settings.menu_open || !snapshot_.local_valid)
             {
                 aim_toggle_active_ = false;
                 dino_aim_toggle_active_ = false;
@@ -1741,6 +2227,7 @@ namespace kopt
                         dino_aim_key_armed_ = false;
                 }
             }
+            restore_managarmr_aim_offset();
             return;
         }
         snapshot_.aim_active = true;
@@ -1899,6 +2386,7 @@ namespace kopt
                 locked_target_ = 0;
                 locked_target_occluded_seconds_ = 0.0F;
                 status_ = L"Aim disabled: LineOfSightTo symbol mismatch";
+                restore_managarmr_aim_offset();
                 return;
             }
             line_of_sight = reinterpret_cast<LineOfSightFn>(module_base_ + line_of_sight_rva);
@@ -1993,7 +2481,11 @@ namespace kopt
                 locked_target_occluded_seconds_ = 0.0F;
             }
         }
-        if (best == nullptr || !best_point_valid) return;
+        if (best == nullptr || !best_point_valid)
+        {
+            restore_managarmr_aim_offset();
+            return;
+        }
         if (best->kind == ActorKind::player &&
             read_player_bones(best->address, best->position, *best))
             best_point = target_point(*best);
@@ -2063,13 +2555,58 @@ namespace kopt
         rotation.x += pitch_error * response;
         rotation.y += yaw_error * response;
         rotation.z = 0.0F;
-        // PDB profile: AShooterPlayerController::SetControlRotation at RVA 0x1087E60.
-        // Use the game's override on the game thread instead of a raw memory write. Besides
-        // avoiding adjacent input fields, the override owns the mounted-dino rotation path.
-        constexpr std::uintptr_t set_control_rotation_rva = 0x1087E60;
-        static constexpr std::array<std::uint8_t, 6> prologue{0x48, 0x89, 0x54, 0x24, 0x10, 0x48};
-        if (std::memcmp(reinterpret_cast<const void*>(module_base_ + set_control_rotation_rva),
-            prologue.data(), prologue.size()) != 0)
+        // ShooterGame 358.26 PDB profile. Managarmr/Wyvern steering and their breath view
+        // consume Controller::ControlRotation. Writing that shared rotator makes the mount
+        // steer toward the selected target and effectively takes WASD away from the rider.
+        // Keep the controller untouched and drive the two presentation/ability inputs which
+        // are independent from movement instead:
+        //   APrimalDinoCharacter::CurrentAimOffsetsRotation at +0x1A90
+        //   APlayerCameraManager::CameraCache.POV.Rotation
+        // GetCurrentAimOffsetsRotation (RVA 0x6A8D20) proves the first field in the exact PDB.
+        // This path also avoids BPModifyControlRotation/ProcessEvent entirely.
+        if (snapshot_.managarmr_safe_aim)
+        {
+            constexpr std::uintptr_t current_aim_offsets_rotation = 0x1A90;
+            std::uintptr_t root{};
+            NativeTransform transform{};
+            if (read(snapshot_.local_pawn + offsets_.actor_root_component, root) && root >= 0x10000 &&
+                read(root + offsets_.component_to_world, transform) && transform.valid())
+            {
+                const float sin_pitch = std::clamp(2.0F *
+                    (transform.rotation_w * transform.rotation_y -
+                        transform.rotation_z * transform.rotation_x), -1.0F, 1.0F);
+                const float actor_pitch = std::asin(sin_pitch) * radians_to_degrees;
+                const float actor_yaw = std::atan2(2.0F *
+                    (transform.rotation_w * transform.rotation_z +
+                        transform.rotation_x * transform.rotation_y),
+                    1.0F - 2.0F * (transform.rotation_y * transform.rotation_y +
+                        transform.rotation_z * transform.rotation_z)) * radians_to_degrees;
+                const Vec3 aim_offset{
+                    normalize_angle(rotation.x - actor_pitch),
+                    normalize_angle(rotation.y - actor_yaw),
+                    0.0F};
+                write(snapshot_.local_pawn + current_aim_offsets_rotation, aim_offset);
+                managarmr_aim_offset_pawn_ = snapshot_.local_pawn;
+                managarmr_aim_offset_dirty_ = true;
+            }
+            if (engine_object_live(snapshot_.camera_manager))
+            {
+                const std::uintptr_t pov = snapshot_.camera_manager +
+                    offsets_.camera_cache + offsets_.camera_pov;
+                write(pov + 0xC, rotation);
+                snapshot_.camera.rotation = rotation;
+            }
+            return;
+        }
+
+        restore_managarmr_aim_offset();
+
+        // Other pawns retain the verified virtual controller route.
+        constexpr std::uintptr_t shooter_set_control_rotation_rva = 0x1087E60;
+        static constexpr std::array<std::uint8_t, 6> shooter_prologue{
+            0x48, 0x89, 0x54, 0x24, 0x10, 0x48};
+        if (std::memcmp(reinterpret_cast<const void*>(module_base_ + shooter_set_control_rotation_rva),
+            shooter_prologue.data(), shooter_prologue.size()) != 0)
         {
             locked_target_ = 0;
             locked_target_occluded_seconds_ = 0.0F;
@@ -2083,8 +2620,27 @@ namespace kopt
             locked_target_occluded_seconds_ = 0.0F;
             return;
         }
-        const auto function = reinterpret_cast<SetControlRotationFn>(module_base_ + set_control_rotation_rva);
+        const auto function = reinterpret_cast<SetControlRotationFn>(module_base_ + shooter_set_control_rotation_rva);
         function(reinterpret_cast<void*>(snapshot_.local_controller), rotation);
+    }
+
+    void ArkRuntime::restore_managarmr_aim_offset() noexcept
+    {
+        // CurrentAimOffsetsRotation is a transient ability input. Leaving the last
+        // target-relative rotator behind makes IceJumper keep steering toward the
+        // previous click even after aim is released or disabled. Zero is the native
+        // neutral value used before BPModifyControlRotation applies an ability offset.
+        if (managarmr_aim_offset_pawn_ >= 0x10000)
+        {
+            constexpr std::uintptr_t current_aim_offsets_rotation = 0x1A90;
+            const Vec3 neutral{};
+            write(managarmr_aim_offset_pawn_ + current_aim_offsets_rotation, neutral);
+        }
+        // Never write an assumed neutral value into an idle mounted pawn. Different
+        // dino Blueprints reuse nearby replicated fields differently; rollback is only
+        // valid for the exact pawn/value transaction recorded above.
+        managarmr_aim_offset_pawn_ = 0;
+        managarmr_aim_offset_dirty_ = false;
     }
 
     void ArkRuntime::run_camera(Settings& settings, const float delta_seconds)
@@ -2097,13 +2653,14 @@ namespace kopt
         // The engine has already produced the ADS camera for this frame. Never
         // overwrite it while RMB is held; the custom FOV resumes on release.
         const bool weapon_zoom_active = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-        if (settings.fov_override && !weapon_zoom_active)
+        if (settings.fov_override && !snapshot_.local_mounted && !weapon_zoom_active)
         {
             write(pov + 0x28, settings.camera_fov);
             snapshot_.camera.fov = settings.camera_fov;
         }
         if (!settings.freecam)
         {
+            restore_freecam_near_clip();
             freecam_mouse_x_.store(0, std::memory_order_relaxed);
             freecam_mouse_y_.store(0, std::memory_order_relaxed);
             if (freecam_was_enabled_ && freecam_pov_ >= 0x10000)
@@ -2116,6 +2673,26 @@ namespace kopt
             }
             freecam_was_enabled_ = false;
             return;
+        }
+        // A noclip camera briefly sits inside wall/terrain triangles while crossing
+        // them. ARK's normal 10 cm near plane lets those very close backfaces cover
+        // the entire projection. Use a wider plane only for freecam and restore the
+        // engine global transactionally when freecam ends.
+        constexpr std::uintptr_t near_clipping_plane_rva = 0x4935CA8;
+        const std::uintptr_t near_clipping_plane = module_base_ + near_clipping_plane_rva;
+        if (!freecam_near_clip_applied_)
+        {
+            float current{};
+            if (read(near_clipping_plane, current) && std::isfinite(current) && current > 0.01F && current < 1000.0F)
+            {
+                freecam_restore_near_clip_ = current;
+                freecam_near_clip_applied_ = true;
+            }
+        }
+        if (freecam_near_clip_applied_)
+        {
+            constexpr float freecam_near_clip = 75.0F;
+            write(near_clipping_plane, freecam_near_clip);
         }
         if (!freecam_was_enabled_)
         {
@@ -2166,6 +2743,17 @@ namespace kopt
         write(pov + 0xC, freecam_rotation_);
         snapshot_.camera.location = freecam_position_;
         snapshot_.camera.rotation = freecam_rotation_;
+    }
+
+    void ArkRuntime::restore_freecam_near_clip() noexcept
+    {
+        if (!freecam_near_clip_applied_ || module_base_ == 0) return;
+        constexpr std::uintptr_t near_clipping_plane_rva = 0x4935CA8;
+        if (std::isfinite(freecam_restore_near_clip_) && freecam_restore_near_clip_ > 0.01F &&
+            freecam_restore_near_clip_ < 1000.0F)
+            write(module_base_ + near_clipping_plane_rva, freecam_restore_near_clip_);
+        freecam_restore_near_clip_ = 0.0F;
+        freecam_near_clip_applied_ = false;
     }
 
     void ArkRuntime::update_no_recoil(const Settings& settings)
@@ -2344,6 +2932,8 @@ namespace kopt
 
     void ArkRuntime::restore_transient_state()
     {
+        restore_managarmr_aim_offset();
+        restore_freecam_near_clip();
         restore_no_recoil();
         restore_no_sway();
         if (freecam_was_enabled_ && freecam_pov_ >= 0x10000)

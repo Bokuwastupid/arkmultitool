@@ -109,17 +109,34 @@ namespace kopt
         void draw_aim_overlay(const Settings& settings, const ArkRuntime& runtime);
         void draw_radar(const Settings& settings, const ArkRuntime& runtime);
         void draw_alerts(const Settings& settings, const ArkRuntime& runtime);
+        void draw_horde_alert(const Settings& settings, const ArkRuntime& runtime);
         void draw_hotkey_list(const Settings& settings, const ArkRuntime& runtime);
         void draw_menu(Settings& settings, ArkRuntime& runtime, InputState& input,
             const std::filesystem::path& settings_path);
         void draw_command_palette(Settings& settings, InputState& input, const Rect& menu_frame);
         void draw_esp_preview(Settings& settings, float x, float y, InputState& input);
         void draw_debug(const ArkRuntime& runtime);
+        void draw_diagnostics_body(const ArkRuntime& runtime, float x, float& y, float right);
+
+    public:
+        // Emits one machine-readable diagnostics line at most once per interval,
+        // so a session leaves a timeline in the log instead of numbers that only
+        // ever existed on screen. Returns false when it is not due yet.
+        bool take_diagnostics_line(const ArkRuntime& runtime, std::wstring& line);
+
+    private:
+        void set_clip(const Rect& rect);
+        void clear_clip();
+        [[nodiscard]] bool clip_allows(const Rect& bounds) const;
         void fill(const Rect& rect, const Color& color);
+        void fill_rounded(const Rect& rect, float radius, const Color& color);
+        void stroke_rounded(const Rect& rect, float radius, const Color& color, float width = 1.0F);
+        void fill_circle(float cx, float cy, float radius, const Color& color);
         void stroke(const Rect& rect, const Color& color, float width = 1.0F);
         void line(float x1, float y1, float x2, float y2, const Color& color, float width = 1.0F);
         void text(const std::wstring& value, const Rect& rect, const Color& color,
             float size = 14.0F, TextAlign alignment = TextAlign::left);
+        float measure_text(const std::wstring& value, float size = 14.0F) const;
         bool button(const std::wstring& label, const Rect& rect, bool active, InputState& input);
         bool toggle(const std::wstring& label, bool& value, float x, float& y, InputState& input);
         bool checkbox(const std::wstring& label, bool& value, float x, float& y, InputState& input);
@@ -132,6 +149,10 @@ namespace kopt
             std::size_t count, int id, float x, float& y, InputState& input);
         bool keybind(const std::wstring& label, std::uint32_t& value, BindingTarget target,
             float x, float& y, InputState& input);
+        bool color_picker(const std::wstring& label, Color& value, int id,
+            float x, float& y, InputState& input);
+        bool draw_palette(Color& value, float x, float& y, InputState& input);
+        static int color_picker_id(std::wstring_view feature_id, std::wstring_view color_label);
         void process_binding_capture(Settings& settings, InputState& input);
         bool consume_click(const Rect& rect, InputState& input) const;
         bool consume_right_click(const Rect& rect, InputState& input) const;
@@ -173,6 +194,19 @@ namespace kopt
         int structure_catalog_page_{};
         int camera_settings_page_{};
         int alert_settings_page_{};
+        int horde_settings_page_{};
+        int settings_tab_page_{};
+        // The slider widget works in floats; the setting itself is whole minutes.
+        float journal_retention_slider_{60.0F};
+        bool journal_retention_synced_{};
+        int open_color_picker_{-1};
+        Rect clip_rect_{};
+        bool clip_active_{};
+        float menu_scroll_{};
+        float menu_content_height_{};
+        float menu_viewport_height_{};
+        int horde_loot_page_{};
+        std::uintptr_t horde_selected_address_{};
         int hotkey_page_{};
         int command_page_{};
         int loaded_layout_{-1};
@@ -213,6 +247,54 @@ namespace kopt
         std::size_t aim_replay_index_{};
         float preview_left_{};
         float preview_top_{};
+
+        // Per-frame diagnostics. Instantaneous values flicker too fast to read on
+        // screen, so each timing keeps a rolling window and the panel shows the
+        // average with the worst frame in that window beside it.
+        struct FrameTiming
+        {
+            std::array<float, 120> samples{};
+            std::size_t next{};
+            std::size_t filled{};
+            void push(float value)
+            {
+                samples[next] = value;
+                next = (next + 1) % samples.size();
+                filled = std::min(filled + 1, samples.size());
+            }
+            [[nodiscard]] float average() const
+            {
+                if (filled == 0) return 0.0F;
+                float total{};
+                for (std::size_t index = 0; index < filled; ++index) total += samples[index];
+                return total / static_cast<float>(filled);
+            }
+            [[nodiscard]] float peak() const
+            {
+                float worst{};
+                for (std::size_t index = 0; index < filled; ++index) worst = std::max(worst, samples[index]);
+                return worst;
+            }
+        };
+        struct EspStats
+        {
+            int considered{};
+            int drawn{};
+            int players{};
+            int dinos{};
+            int structures{};
+            int turrets{};
+            int other{};
+            int labels{};
+            int offscreen{};
+            int grouped_away{};
+        };
+        FrameTiming esp_timing_;
+        FrameTiming menu_timing_;
+        FrameTiming frame_timing_;
+        EspStats esp_stats_;
+        std::chrono::steady_clock::time_point last_frame_stamp_{};
+        std::chrono::steady_clock::time_point last_stats_log_{};
         float preview_drag_offset_x_{};
         float preview_drag_offset_y_{};
         std::wstring profile_name_{L"default"};

@@ -88,6 +88,11 @@ namespace kopt
         bool structure_esp{true};
         bool turret_esp{true};
         bool drop_esp{false};
+        bool horde_esp{true};
+        bool horde_reward_preview{true};
+        bool horde_map_alert{true};
+        float horde_distance_m{25000.0F};
+        bool explorer_note_esp{true};
         bool death_cache_esp{false};
         bool player_item_cache_esp{true};
         bool dino_item_cache_esp{true};
@@ -107,6 +112,11 @@ namespace kopt
         bool show_radar{};
         bool show_threat_panel{true};
         bool structure_grouping{true};
+        bool dino_grouping{true};
+        // Off by default: verbose per-actor readouts (turret ammo/range/target)
+        // are what turn a defended base into a wall of text. Bind this to a key
+        // and hold/toggle it when the detail is actually wanted.
+        bool esp_detailed_view{};
         bool structure_whitelist_enabled{};
         bool show_tracers{false};
         bool offscreen_arrows{true};
@@ -174,7 +184,11 @@ namespace kopt
         float radar_x{0.86F};
         float radar_y{0.20F};
         float structure_group_radius_m{12.0F};
+        float dino_group_radius_m{8.0F};
         float esp_distance_m{700.0F};
+        // Effectively "always detailed" by default: only turret readouts are meant
+        // to be conditional (see esp_detailed_view), everything else stays full at
+        // any range. Lower this only if you specifically want distance LOD.
         float esp_detail_distance_m{5000.0F};
         float drop_distance_m{5000.0F};
         float refresh_interval_ms{33.0F};
@@ -216,7 +230,6 @@ namespace kopt
 
         bool local_chams{};
         std::int32_t local_chams_style{};
-        bool enemy_chams{};
         bool chams_players{true};
         bool chams_dinos{true};
         float chams_distance_m{400.0F};
@@ -234,6 +247,11 @@ namespace kopt
         std::uint32_t esp_toggle_key{VK_F7};
         std::uint32_t panic_key{VK_F12};
 
+        // How far back the contact journal keeps events. The point of the journal
+        // is stepping away and coming back, so the default is an hour rather than
+        // the seconds an on-screen alert lives for.
+        std::int32_t journal_retention_min{60};
+
         Color own_color{0.29F, 0.90F, 0.62F, 1.0F};
         Color ally_color{0.29F, 0.68F, 1.0F, 1.0F};
         Color enemy_color{1.0F, 0.31F, 0.38F, 1.0F};
@@ -248,6 +266,15 @@ namespace kopt
         Color torpor_color{0.30F, 0.66F, 1.0F, 1.0F};
         Color menu_accent_color{0.545F, 0.361F, 0.965F, 1.0F};
         Color local_chams_color{0.64F, 0.24F, 1.0F, 1.0F};
+        // Defaults match what these actor kinds were previously hardcoded to (or,
+        // for turrets and loot, the structure/enemy color they inherited) so
+        // making them configurable does not change how anything already looks.
+        Color turret_color{0.35F, 0.78F, 1.0F, 1.0F};
+        Color drop_color{1.0F, 0.31F, 0.38F, 1.0F};
+        Color death_cache_color{1.0F, 0.31F, 0.38F, 1.0F};
+        Color horde_crate_color{1.0F, 0.48F, 0.12F, 1.0F};
+        Color element_node_color{0.18F, 0.88F, 1.0F, 1.0F};
+        Color explorer_note_color{1.0F, 0.82F, 0.22F, 1.0F};
 
         std::vector<std::int32_t> allied_teams;
         std::vector<FeatureBinding> feature_bindings;

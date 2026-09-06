@@ -94,6 +94,10 @@ namespace
             {L"esp.structures", L"Structures", L"ESP", &S::structure_esp},
             {L"esp.turrets", L"Turrets", L"ESP", &S::turret_esp},
             {L"esp.drops", L"Ground drops", L"ESP", &S::drop_esp},
+            {L"esp.horde", L"Horde OSD + Element Nodes", L"OSD", &S::horde_esp},
+            {L"esp.horde_rewards", L"Horde reward preview", L"OSD", &S::horde_reward_preview},
+            {L"esp.horde_map_alert", L"Horde map alert", L"OSD", &S::horde_map_alert},
+            {L"esp.explorer_notes", L"Explorer Notes / Chests", L"ESP", &S::explorer_note_esp},
             {L"esp.death_caches", L"Death caches", L"ESP", &S::death_cache_esp},
             {L"esp.player_caches", L"Player item caches", L"ESP", &S::player_item_cache_esp},
             {L"esp.dino_caches", L"Dino item caches", L"ESP", &S::dino_item_cache_esp},
@@ -154,6 +158,8 @@ namespace
             {L"esp.radar", L"Radar", L"Radar", &S::show_radar},
             {L"esp.threat", L"Threat panel", L"Radar", &S::show_threat_panel},
             {L"esp.grouping", L"Group dense structures", L"Radar", &S::structure_grouping},
+            {L"esp.dino_grouping", L"Group dense wild dinos", L"Radar", &S::dino_grouping},
+            {L"esp.detailed", L"Detailed readouts (turret ammo/range)", L"ESP", &S::esp_detailed_view},
             {L"esp.structure_whitelist", L"Use selected structure list", L"Structures", &S::structure_whitelist_enabled},
             {L"esp.declutter", L"Smart declutter", L"Radar", &S::smart_declutter},
             {L"camera.freecam", L"Free camera", L"Camera", &S::freecam},
@@ -601,13 +607,23 @@ namespace kopt
         accent_dim = {accent.r * 0.53F, accent.g * 0.51F, accent.b * 0.50F, 1.0F};
         if (!input.frame_left_down) active_slider_ = 0;
         process_binding_capture(settings, input);
+        const auto frame_now = std::chrono::steady_clock::now();
+        if (last_frame_stamp_.time_since_epoch().count() != 0)
+            frame_timing_.push(std::chrono::duration<float, std::milli>(frame_now - last_frame_stamp_).count());
+        last_frame_stamp_ = frame_now;
         vertices_.clear();
         if (settings.aim_draw_fov) draw_aim_overlay(settings, runtime);
+        esp_stats_ = {};
+        const auto esp_started = std::chrono::steady_clock::now();
         if (settings.esp_enabled) draw_esp(settings, runtime);
+        esp_timing_.push(std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - esp_started).count());
+        if (settings.horde_map_alert) draw_horde_alert(settings, runtime);
         if (settings.alerts_enabled) draw_alerts(settings, runtime);
         if (settings.show_hotkey_list) draw_hotkey_list(settings, runtime);
         if (settings.menu_open)
         {
+            const auto menu_started = std::chrono::steady_clock::now();
             const float menu_scale = std::clamp(settings.ui_scale, 0.75F, 1.50F);
             const std::size_t menu_vertex_begin = vertices_.size();
             const float physical_width = width_;
@@ -628,6 +644,8 @@ namespace kopt
                 vertices_[index].x *= menu_scale;
                 vertices_[index].y *= menu_scale;
             }
+            menu_timing_.push(std::chrono::duration<float, std::milli>(
+                std::chrono::steady_clock::now() - menu_started).count());
         }
         if (settings.debug_panel && !settings.menu_open) draw_debug(runtime);
         last_vertex_count_ = vertices_.size();
@@ -783,7 +801,7 @@ namespace kopt
             text(hotkey.category, {row.left + 20.0F, row.top + 17.0F, row.right - 100.0F, row.bottom - 1.0F},
                 text_secondary, 9.0F);
             const std::int32_t mode = std::clamp(hotkey.mode, 0, 2);
-            text(key_name(hotkey.key) + L" · " + modes[static_cast<std::size_t>(mode)],
+            text(key_name(hotkey.key) + L" | " + modes[static_cast<std::size_t>(mode)],
                 {row.right - 128.0F, row.top, row.right - 10.0F, row.bottom}, accent, 10.0F, TextAlign::right);
             row_top += row_height;
         }
@@ -824,6 +842,18 @@ namespace kopt
                     token_list_contains(settings.grouped_structure_types, actor.class_name) ||
                     token_list_contains(settings.grouped_structure_types, actor.name));
         };
+        // Wild dinos are the classic ARK ESP clutter source: dozens can spawn on
+        // top of each other. Group only wild ones (team < 50000) - tamed/hostile
+        // dinos are exactly the targets ESP exists to show, never hide those.
+        const auto dino_group_enabled = [&](const Actor& actor) {
+            return settings.dino_grouping && actor.kind == ActorKind::dino && actor.team < 50000;
+        };
+        const auto group_enabled = [&](const Actor& actor) {
+            return structure_group_enabled(actor) || dino_group_enabled(actor);
+        };
+        const auto group_radius_m = [&](const Actor& actor) {
+            return actor.kind == ActorKind::dino ? settings.dino_group_radius_m : settings.structure_group_radius_m;
+        };
         std::unordered_map<std::wstring, int> structure_summary;
         std::unordered_map<std::wstring, int> player_summary;
         std::unordered_map<std::wstring, int> dino_summary;
@@ -848,24 +878,67 @@ namespace kopt
         {
             for (const Actor& actor : snapshot.actors) count_summary(actor);
         }
-        struct StructureGroup { std::uintptr_t representative{}; int count{}; float distance_squared{}; };
-        std::unordered_map<std::int64_t, StructureGroup> structure_groups;
+        // Per-kind cut, not one global maximum. Taking max() across categories was
+        // useless in practice: horde range defaults to 25 km (and can be set to
+        // 100 km), so the shared threshold discarded nothing and the pass still
+        // touched every actor in the world.
+        const auto beyond_visible_range = [&](const Actor& actor, const float squared) {
+            const float limit_m = actor.kind == ActorKind::horde_crate ||
+                actor.kind == ActorKind::element_node ? settings.horde_distance_m :
+                actor.kind == ActorKind::drop ? settings.drop_distance_m : settings.esp_distance_m;
+            const float limit_units = limit_m * 100.0F;
+            return squared > limit_units * limit_units;
+        };
+        struct ActorGroup { std::uintptr_t representative{}; int count{}; float distance_squared{}; };
+        // Keyed by a 64-bit hash, not a built string. Composing a wstring per
+        // actor per frame (four to_wstring plus a lowercased class-name copy)
+        // was thousands of allocations every frame and measured as the bulk of
+        // ESP's cost even when nothing was drawn.
+        std::unordered_map<std::uint64_t, ActorGroup> actor_groups;
         std::unordered_map<std::uintptr_t, int> representative_counts;
-        if (settings.structure_grouping)
+        const auto mix = [](std::uint64_t seed, const std::uint64_t value) {
+            seed ^= value + 0x9E3779B97F4A7C15ULL + (seed << 6) + (seed >> 2);
+            return seed;
+        };
+        // Case-folded in place so the key stays case-insensitive without copying
+        // the class name.
+        const auto class_hash = [&](const std::wstring& value) {
+            std::uint64_t hash = 1469598103934665603ULL;
+            for (const wchar_t character : value)
+                hash = (hash ^ static_cast<std::uint64_t>(std::towlower(character))) * 1099511628211ULL;
+            return hash;
+        };
+        if (settings.structure_grouping || settings.dino_grouping)
         {
-            const float cell = settings.structure_group_radius_m * 100.0F;
             for (const Actor& actor : snapshot.actors)
             {
-                if (!structure_group_enabled(actor) || actor_text_filtered(actor)) continue;
+                if (!group_enabled(actor) || actor_text_filtered(actor)) continue;
+                // Same distance cut as the draw list below. A member out of range
+                // can neither be drawn nor be the representative, so it would only
+                // cost a hash - and the count then reflects what is in range, which
+                // is what the "xN" on screen is claiming anyway.
+                const float to_camera_x = actor.position.x - snapshot.camera.location.x;
+                const float to_camera_y = actor.position.y - snapshot.camera.location.y;
+                const float to_camera_z = actor.position.z - snapshot.camera.location.z;
+                if (beyond_visible_range(actor, to_camera_x * to_camera_x +
+                    to_camera_y * to_camera_y + to_camera_z * to_camera_z)) continue;
+                const float cell = group_radius_m(actor) * 100.0F;
                 const auto grid_x = static_cast<std::int32_t>(std::floor(actor.position.x / cell));
                 const auto grid_y = static_cast<std::int32_t>(std::floor(actor.position.y / cell));
-                const auto key = static_cast<std::int64_t>(static_cast<std::uint32_t>(grid_x)) << 32 |
-                    static_cast<std::uint32_t>(grid_y);
+                // Kind + grid cell + class + owning team. Two different structure
+                // types stacked in the same spot must stay two counts, and a group
+                // must never span owners: merging your foundation with an enemy's
+                // hid theirs and painted the survivor in your tribe's color.
+                std::uint64_t key = mix(0x1F2E3D4C5B6A7988ULL, static_cast<std::uint64_t>(actor.kind));
+                key = mix(key, static_cast<std::uint32_t>(grid_x));
+                key = mix(key, static_cast<std::uint32_t>(grid_y));
+                key = mix(key, static_cast<std::uint32_t>(actor.team));
+                key = mix(key, class_hash(actor.class_name));
                 const float dx = actor.position.x - snapshot.camera.location.x;
                 const float dy = actor.position.y - snapshot.camera.location.y;
                 const float dz = actor.position.z - snapshot.camera.location.z;
                 const float squared = dx * dx + dy * dy + dz * dz;
-                auto& group = structure_groups[key];
+                auto& group = actor_groups[key];
                 ++group.count;
                 if (group.representative == 0 || squared < group.distance_squared)
                 {
@@ -873,22 +946,48 @@ namespace kopt
                     group.distance_squared = squared;
                 }
             }
-            for (const auto& [key, group] : structure_groups)
+            for (const auto& [key, group] : actor_groups)
             {
                 (void)key;
                 representative_counts[group.representative] = group.count;
             }
         }
+        // Draw nearest-first, so label fan-out gives the closest actors their
+        // natural position. Sorting the whole snapshot for this measured as ~5 ms
+        // per frame at 7k actors while drawing nothing, so anything past the
+        // furthest distance any category can use is dropped before the sort - it
+        // could not have been drawn anyway.
+        std::vector<std::pair<float, const Actor*>> ordered_actors;
+        ordered_actors.reserve(std::min<std::size_t>(snapshot.actors.size(), 512));
         for (const Actor& actor : snapshot.actors)
         {
+            const float dx = actor.position.x - snapshot.camera.location.x;
+            const float dy = actor.position.y - snapshot.camera.location.y;
+            const float dz = actor.position.z - snapshot.camera.location.z;
+            const float squared = dx * dx + dy * dy + dz * dz;
+            if (beyond_visible_range(actor, squared)) continue;
+            ordered_actors.emplace_back(squared, &actor);
+        }
+        std::ranges::sort(ordered_actors, [](const auto& left, const auto& right) {
+            return left.first < right.first;
+        });
+        for (const auto& [actor_distance_squared, actor_pointer] : ordered_actors)
+        {
+            (void)actor_distance_squared;
+            const Actor& actor = *actor_pointer;
             if (actor.address == snapshot.local_pawn || actor.address == snapshot.local_character) continue;
+            ++esp_stats_.considered;
             if (actor_text_filtered(actor)) continue;
-            int structure_group_count{1};
-            if (structure_group_enabled(actor))
+            int actor_group_count{1};
+            if (group_enabled(actor))
             {
                 const auto group = representative_counts.find(actor.address);
-                if (group == representative_counts.end()) continue;
-                structure_group_count = group->second;
+                if (group == representative_counts.end())
+                {
+                    ++esp_stats_.grouped_away;
+                    continue;
+                }
+                actor_group_count = group->second;
             }
             bool enabled{};
             if (settings.battle_mode)
@@ -905,6 +1004,9 @@ namespace kopt
             }
             else if (actor.kind == ActorKind::structure) enabled = actor.turret ? settings.turret_esp : settings.structure_esp;
             else if (actor.kind == ActorKind::drop) enabled = settings.drop_esp;
+            else if (actor.kind == ActorKind::horde_crate || actor.kind == ActorKind::element_node)
+                enabled = settings.horde_esp;
+            else if (actor.kind == ActorKind::explorer_note) enabled = settings.explorer_note_esp;
             else if (actor.kind == ActorKind::death_cache)
             {
                 const std::wstring cache_type = lower_copy(actor.class_name + L" " + actor.name);
@@ -942,7 +1044,8 @@ namespace kopt
             }
 
             const float distance_m = distance3(actor.position, snapshot.camera.location) / 100.0F;
-            if (distance_m > settings.esp_distance_m) continue;
+            const bool horde_actor = actor.kind == ActorKind::horde_crate || actor.kind == ActorKind::element_node;
+            if (distance_m > (horde_actor ? settings.horde_distance_m : settings.esp_distance_m)) continue;
             if (actor.kind == ActorKind::drop && distance_m > settings.drop_distance_m) continue;
             const bool detailed = distance_m <= settings.esp_detail_distance_m;
             if (!allied && distance_m <= settings.threat_distance_m)
@@ -963,7 +1066,18 @@ namespace kopt
             Vec2 feet{};
             Vec2 head{};
             const bool feet_visible = runtime.world_to_screen(actor.position, width_, height_, feet);
-            const bool head_visible = runtime.world_to_screen(top, width_, height_, head);
+            bool head_visible = runtime.world_to_screen(top, width_, height_, head);
+            // Point-blank range (standing right on top of a turret/structure) can
+            // put the head point - world_height above the feet - behind the
+            // camera's near plane even though the feet point still projects
+            // fine, so the whole actor just vanished from ESP exactly when
+            // closest to it. Retry with a shorter reach before giving up.
+            if (feet_visible && !head_visible)
+            {
+                Vec3 half_top = actor.position;
+                half_top.z += world_height * 0.5F;
+                head_visible = runtime.world_to_screen(half_top, width_, height_, head);
+            }
             Color color = own ? settings.own_color : (settings.is_allied(actor.team) ?
                 settings.ally_color : settings.enemy_color);
             const Color status_color = actor.kind == ActorKind::player ?
@@ -976,10 +1090,17 @@ namespace kopt
                 color = settings.player_occluded_color;
             if (actor.kind == ActorKind::dino && actor.team < 50000) color = settings.wild_color;
             if (actor.kind == ActorKind::structure) color = settings.structure_color;
+            if (actor.turret) color = settings.turret_color;
+            if (actor.kind == ActorKind::drop) color = settings.drop_color;
+            if (actor.kind == ActorKind::death_cache) color = settings.death_cache_color;
+            if (actor.kind == ActorKind::horde_crate) color = settings.horde_crate_color;
+            if (actor.kind == ActorKind::element_node) color = settings.element_node_color;
+            if (actor.kind == ActorKind::explorer_note) color = settings.explorer_note_color;
             color.a *= settings.esp_opacity;
 
             if (!feet_visible || !head_visible || feet.x < 0.0F || feet.x > width_ || feet.y < 0.0F || feet.y > height_)
             {
+                ++esp_stats_.offscreen;
                 if (!settings.offscreen_arrows || !feet_visible) continue;
                 const float center_x = width_ * 0.5F;
                 const float center_y = height_ * 0.5F;
@@ -1000,6 +1121,13 @@ namespace kopt
                 line(right_wing.x, right_wing.y, tip.x, tip.y, color, 2.5F);
                 continue;
             }
+
+            ++esp_stats_.drawn;
+            if (actor.turret) ++esp_stats_.turrets;
+            else if (actor.kind == ActorKind::player) ++esp_stats_.players;
+            else if (actor.kind == ActorKind::dino) ++esp_stats_.dinos;
+            else if (actor.kind == ActorKind::structure) ++esp_stats_.structures;
+            else ++esp_stats_.other;
 
             const float box_height = std::max(24.0F, feet.y - head.y);
             const float box_width = box_height * 0.45F;
@@ -1270,7 +1398,20 @@ namespace kopt
             }
             if (actor.kind == ActorKind::drop && settings.show_drop_quantity && actor.quantity > 1)
                 label += L"  x" + std::to_wstring(actor.quantity);
-            if (actor.turret && settings.show_turret_details)
+            if ((actor.kind == ActorKind::horde_crate || actor.kind == ActorKind::element_node) &&
+                settings.horde_reward_preview)
+            {
+                if (actor.horde_wave >= 0) label += L"\nWAVE " + std::to_wstring(actor.horde_wave);
+                if (!actor.reward_preview.empty())
+                {
+                    const std::size_t line_end = actor.reward_preview.find(L'\n');
+                    label += L"\n" + actor.reward_preview.substr(0, line_end);
+                }
+            }
+            // Gated on the bindable Detailed toggle, not distance: a defended base
+            // is a wall of ammo/range/target text at any range, and it is only
+            // wanted at the moment you go looking for it.
+            if (actor.turret && settings.show_turret_details && settings.esp_detailed_view)
             {
                 const std::wstring separator = settings.compact_labels ? L"  " : L"\n";
                 if (settings.turret_show_ammo)
@@ -1283,7 +1424,11 @@ namespace kopt
                 if (settings.turret_show_target_state)
                     label += separator + (actor.turret_targeting_actor ? L"TARGET LOCK" : L"NO TARGET");
             }
-            if (structure_group_count > 1) label += L"  x" + std::to_wstring(structure_group_count);
+            if (actor_group_count > 1) label += L"  x" + std::to_wstring(actor_group_count);
+            // No cap and no skipping: every actor that passes the filters always
+            // gets its label. Density is handled by keeping labels short (turret
+            // readouts are behind esp_detailed_view) and by nudging overlapping
+            // ones apart below, never by dropping them.
             if (!label.empty())
             {
                 Rect label_rect{box.left - 120.0F, box.top - 23.0F, box.right + 120.0F, box.top};
@@ -1302,7 +1447,38 @@ namespace kopt
                 {
                     label_rect = {box.left - 120.0F, box.bottom + 4.0F, box.right + 120.0F, box.bottom + 28.0F};
                 }
-                text(label, label_rect, color, settings.esp_label_size, alignment);
+                // Plain text floating directly over the game world with no backing
+                // card at all was hard to read against busy backgrounds and read as
+                // visually unfinished. Size a tight backdrop to the real text
+                // extent (not the generously-padded hit rect) so it hugs the label.
+                const std::size_t label_lines = static_cast<std::size_t>(
+                    std::count(label.begin(), label.end(), L'\n')) + 1;
+                const float label_width = measure_text(label, settings.esp_label_size);
+                const float label_line_height = settings.esp_label_size * 1.25F;
+                const float label_text_height = label_line_height * static_cast<float>(label_lines);
+                const float card_width = label_width + 14.0F;
+                const float card_height = std::min(label_text_height,
+                    label_rect.bottom - label_rect.top) + 6.0F;
+                const float card_left = alignment == TextAlign::center ?
+                    (label_rect.left + label_rect.right - card_width) * 0.5F :
+                    alignment == TextAlign::right ? label_rect.right - card_width : label_rect.left;
+                const float card_top = label_rect.top +
+                    std::max(0.0F, ((label_rect.bottom - label_rect.top) - card_height) * 0.5F);
+                const Rect card{card_left, card_top, card_left + card_width, card_top + card_height};
+                // Labels stay where they belong. Nudging colliding ones apart was
+                // introduced for a wall of turret readouts, but that is now solved
+                // at the source (esp_detailed_view keeps those off by default).
+                // At real base density the fan sent hundreds of structure labels
+                // climbing into the sky, each trailing a leader line back down -
+                // far worse than plain overlap, and it also detached labels from
+                // their owner, which read as wrong tribe colors.
+                ++esp_stats_.labels;
+                // text() silently stops drawing once it walks past the right edge
+                // of the rect it is given, so hand it the card's width rather than
+                // the narrower fixed label_rect, which clipped long labels.
+                const Rect adjusted_label_rect{card.left + 2.0F, card.top,
+                    card.right - 2.0F, card.bottom};
+                text(label, adjusted_label_rect, color, settings.esp_label_size, alignment);
             }
             if (actor.kind == ActorKind::player && settings.show_player_status)
             {
@@ -1339,8 +1515,8 @@ namespace kopt
                 }
                 const Color badge_color{status_color.r, status_color.g, status_color.b,
                     status_color.a * settings.esp_opacity};
-                fill(status_rect, {0.018F, 0.012F, 0.028F, 0.88F * settings.esp_opacity});
-                stroke(status_rect, badge_color, 1.0F);
+                fill_rounded(status_rect, 5.0F, {0.018F, 0.012F, 0.028F, 0.88F * settings.esp_opacity});
+                stroke_rounded(status_rect, 5.0F, badge_color, 1.0F);
                 text(player_state_label(player_state), status_rect, badge_color,
                     std::max(10.0F, settings.esp_label_size - 2.0F), TextAlign::center);
             }
@@ -1505,6 +1681,42 @@ namespace kopt
                 width_ * 0.5F + std::cos(second) * radius, height_ * 0.5F + std::sin(second) * radius,
                 {0.29F, 0.90F, 0.62F, 0.68F}, 1.2F);
         }
+    }
+
+    void Overlay::draw_horde_alert(const Settings&, const ArkRuntime& runtime)
+    {
+        const Snapshot& snapshot = runtime.snapshot();
+        if (!snapshot.local_valid) return;
+
+        std::vector<const Actor*> active;
+        for (const Actor& actor : snapshot.actors)
+        {
+            if (actor.kind == ActorKind::horde_crate && actor.stale_seconds <= 0.0F)
+                active.push_back(&actor);
+        }
+        if (active.empty()) return;
+        std::ranges::sort(active, [&](const Actor* left, const Actor* right) {
+            return distance3(left->position, snapshot.local_position) <
+                distance3(right->position, snapshot.local_position);
+        });
+
+        constexpr float card_width = 430.0F;
+        constexpr float card_height = 66.0F;
+        const float left = std::max(12.0F, (width_ - card_width) * 0.5F);
+        const float top = 18.0F;
+        const Color osd_color{1.0F, 0.48F, 0.12F, 1.0F};
+        const Rect card{left, top, left + card_width, top + card_height};
+        fill(card, {panel.r, panel.g, panel.b, 0.96F});
+        stroke(card, {osd_color.r, osd_color.g, osd_color.b, 0.86F}, 1.0F);
+        fill({card.left, card.top, card.left + 5.0F, card.bottom}, osd_color);
+        text(L"ACTIVE OSD ON MAP" + (active.size() > 1 ? L"  x" + std::to_wstring(active.size()) : L""),
+            {card.left + 17.0F, card.top + 7.0F, card.right - 12.0F, card.top + 29.0F}, osd_color, 12.0F);
+        const Actor& nearest = *active.front();
+        std::wstring detail = nearest.name.empty() ? L"Horde OSD" : nearest.name;
+        detail += L"  |  WAVE " + (nearest.horde_wave >= 0 ? std::to_wstring(nearest.horde_wave) : L"?");
+        detail += L"  |  " + fixed(distance3(nearest.position, snapshot.local_position) / 100.0F, 0) + L" m";
+        text(detail, {card.left + 17.0F, card.top + 32.0F, card.right - 12.0F, card.bottom - 6.0F},
+            text_primary, 12.0F);
     }
 
     void Overlay::draw_alerts(const Settings& settings, const ArkRuntime& runtime)
@@ -1679,23 +1891,49 @@ namespace kopt
         active_layout.radar_x = settings.radar_x;
         active_layout.radar_y = settings.radar_y;
         current_menu_bottom_ = frame.bottom;
-        fill(frame, panel);
-        stroke(frame, {0.220F, 0.145F, 0.365F, 1.0F}, 1.0F);
+        constexpr float frame_radius = 12.0F;
+        // Cheap layered "shadow": a few progressively larger, fainter rounded
+        // rects behind the panel. No blur shader in this pipeline, but stacked
+        // low-alpha layers read as soft depth at this scale.
+        for (int layer = 4; layer >= 1; --layer)
+        {
+            const float spread = static_cast<float>(layer) * 3.0F;
+            fill_rounded({frame.left - spread * 0.3F, frame.top - spread * 0.2F + 4.0F,
+                frame.right + spread * 0.3F, frame.bottom + spread * 0.6F},
+                frame_radius + spread * 0.3F, {0.0F, 0.0F, 0.0F, 0.05F});
+        }
+        fill_rounded(frame, frame_radius, panel);
+        stroke_rounded(frame, frame_radius, {0.220F, 0.145F, 0.365F, 1.0F}, 1.0F);
+        {
+            // The resize hitbox (resize_region, above) had no visual affordance at
+            // all - nothing on screen hinted the corner was draggable. Draw the
+            // classic diagonal-stripe grip so it reads as resizable at a glance.
+            const bool resize_hovered = menu_resizing_ ||
+                contains(resize_region, input.frame_mouse_x, input.frame_mouse_y);
+            const Color grip_color = resize_hovered ? accent : text_secondary;
+            const float gx = frame.right - 5.0F;
+            const float gy = frame.bottom - 5.0F;
+            for (const float offset : {5.0F, 10.0F, 15.0F})
+                line(gx - offset, gy, gx, gy - offset, grip_color, 1.6F);
+        }
         fill({left, top, left + sidebar_width, top + menu_height}, {0.025F, 0.018F, 0.037F, 0.99F});
         fill({left, top, left + 4.0F, top + menu_height}, accent);
         text(L"KOPT", {left + 20.0F, top + 22.0F, left + sidebar_width - 16.0F, top + 55.0F}, text_primary, 25.0F);
         text(compact_navigation ? L"INTERNAL" : L"INTERNAL / PROTON",
             {left + 20.0F, top + 54.0F, left + sidebar_width - 12.0F, top + 76.0F}, accent, 10.0F);
 
-        static constexpr const wchar_t* tabs[]{L"Aim", L"ESP", L"Camera", L"Visuals", L"Chams",
-            L"Bindings", L"Hotkeys", L"Alerts", L"Diagnostics"};
+        static constexpr const wchar_t* tabs[]{L"Aim", L"ESP", L"Camera", L"Visuals", L"Settings",
+            L"Alerts", L"Diagnostics"};
+        active_tab_ = std::clamp(active_tab_, 0, static_cast<int>(std::size(tabs)) - 1);
         float tab_y = top + 92.0F;
-        for (int i = 0; i < 9; ++i)
+        for (int i = 0; i < static_cast<int>(std::size(tabs)); ++i)
         {
             if (button(tabs[i], {left + 14.0F, tab_y, left + sidebar_width - 14.0F, tab_y + 38.0F}, active_tab_ == i, input))
             {
                 active_tab_ = i;
                 open_combo_ = -1;
+                menu_scroll_ = 0.0F;
+                menu_content_height_ = 0.0F;
             }
             tab_y += 40.0F;
         }
@@ -1718,6 +1956,21 @@ namespace kopt
         }
         line(content_left, top + 62.0F, frame.right - 28.0F, top + 62.0F, {0.220F, 0.145F, 0.365F, 1.0F});
 
+        // Content taller than the panel used to just draw straight through the
+        // bottom edge and over the game. Offset it by the scroll position, clip
+        // it to the content viewport, and measure its real height so the scroll
+        // range can be clamped on the next frame.
+        const Rect content_viewport{content_left - 18.0F, top + 66.0F,
+            frame.right - 10.0F, frame.bottom - 12.0F};
+        menu_viewport_height_ = content_viewport.bottom - content_viewport.top;
+        const float max_scroll = std::max(0.0F, menu_content_height_ - menu_viewport_height_);
+        if (contains(content_viewport, input.frame_mouse_x, input.frame_mouse_y) && input.frame_wheel != 0)
+            menu_scroll_ -= static_cast<float>(input.frame_wheel) * 0.4F;
+        menu_scroll_ = std::clamp(menu_scroll_, 0.0F, max_scroll);
+        const float content_origin = y - menu_scroll_;
+        y = content_origin;
+        set_clip(content_viewport);
+
         if (active_tab_ == 0)
         {
             static constexpr const wchar_t* sections[]{L"General", L"Targets", L"Tuning", L"Prediction"};
@@ -1734,13 +1987,15 @@ namespace kopt
             y += 48.0F;
             if (active_aim_section_ == 0)
             {
-                checkbox(L"Player aim", settings.player_aim, content_left, y, input);
-                checkbox(L"Dino aim", settings.dino_aim, content_left, y, input);
+                checkbox(L"Aim at players", settings.player_aim, content_left, y, input);
+                checkbox(L"Aim at dinos", settings.dino_aim, content_left, y, input);
                 checkbox(L"Lock selected target", settings.aim_lock, content_left, y, input);
                 checkbox(L"Draw aim FOV", settings.aim_draw_fov, content_left, y, input);
-                text(runtime.snapshot().local_mounted ? L"Mounted controller route: active" : L"Mounted controller route: ready",
+                text(runtime.snapshot().managarmr_safe_aim ? L"Managarmr/Wyvern aim-offset tracking route: active" :
+                    runtime.snapshot().local_mounted ? L"Mounted controller route: active" : L"Mounted controller route: ready",
                     {content_left + 2.0F, y + 8.0F, frame.right - 32.0F, y + 36.0F},
-                    runtime.snapshot().local_mounted ? success : text_secondary, 12.0F);
+                    runtime.snapshot().managarmr_safe_aim ? success :
+                        runtime.snapshot().local_mounted ? success : text_secondary, 12.0F);
             }
             else if (active_aim_section_ == 1)
             {
@@ -1813,18 +2068,30 @@ namespace kopt
         }
         else if (active_tab_ == 1)
         {
-            static constexpr const wchar_t* sections[]{L"Targets", L"Elements", L"Player", L"World", L"Allies", L"Gear", L"Radar", L"Search", L"Colors"};
-            for (int index = 0; index < 9; ++index)
+            static constexpr const wchar_t* sections[]{L"Targets", L"Elements", L"Player", L"World", L"Allies", L"Gear", L"Radar", L"Search", L"Colors", L"OSD"};
+            // Fixed 52px slots clipped every label past four characters
+            // ("Targ", "Elem", "Colo"). Size each chip to its own text and wrap
+            // to a second row when the strip runs out of width.
+            float section_left = content_left;
+            float section_row_top = y;
+            for (int index = 0; index < static_cast<int>(std::size(sections)); ++index)
             {
-                const float section_left = content_left + static_cast<float>(index) * 56.0F;
-                if (button(sections[index], {section_left, y, section_left + 52.0F, y + 34.0F},
+                const float chip_width = measure_text(sections[index], 13.0F) + 28.0F;
+                if (section_left + chip_width > frame.right - 30.0F)
+                {
+                    section_left = content_left;
+                    section_row_top += 38.0F;
+                }
+                if (button(sections[index], {section_left, section_row_top,
+                    section_left + chip_width, section_row_top + 34.0F},
                     active_esp_section_ == index, input))
                 {
                     active_esp_section_ = index;
                     open_combo_ = -1;
                 }
+                section_left += chip_width + 4.0F;
             }
-            y += 48.0F;
+            y = section_row_top + 48.0F;
             if (active_esp_section_ == 0)
             {
                 static constexpr const wchar_t* target_pages[]{L"Categories", L"Relations", L"Distance"};
@@ -1837,6 +2104,11 @@ namespace kopt
                 y += 42.0F;
                 if (target_settings_page_ == 0)
                 {
+                    // One row per category. Colors, binds and per-entry options
+                    // all live in the right-click popup for that row.
+                    text(L"Right-click any row for its color, keybind and options.",
+                        {content_left + 2.0F, y, frame.right - 32.0F, y + 22.0F}, text_secondary, 10.0F);
+                    y += 26.0F;
                     checkbox(L"Master ESP", settings.esp_enabled, content_left, y, input);
                     checkbox(L"Players", settings.player_esp, content_left, y, input);
                     checkbox(L"Enemy / tamed dinosaurs", settings.enemy_dino_esp, content_left, y, input);
@@ -1844,6 +2116,7 @@ namespace kopt
                     checkbox(L"Structures", settings.structure_esp, content_left, y, input);
                     checkbox(L"Turrets", settings.turret_esp, content_left, y, input);
                     checkbox(L"Ground drops", settings.drop_esp, content_left, y, input);
+                    checkbox(L"Explorer Notes / Chests", settings.explorer_note_esp, content_left, y, input);
                     checkbox(L"Death caches", settings.death_cache_esp, content_left, y, input);
                     if (settings.death_cache_esp)
                     {
@@ -1920,7 +2193,7 @@ namespace kopt
                 static constexpr const wchar_t* box_styles[]{L"Full box", L"Corner box"};
                 static constexpr const wchar_t* sides[]{L"Top", L"Left", L"Right", L"Bottom"};
                 static constexpr const wchar_t* player_color_sources[]{L"Relation", L"Player status"};
-                text(L"PLAYER STYLE · controlled by the side Preview", {content_left + 2.0F, y,
+                text(L"PLAYER STYLE | controlled by the side Preview", {content_left + 2.0F, y,
                     frame.right - 32.0F, y + 24.0F}, accent, 11.0F);
                 y += 28.0F;
                 combo(L"Box style", settings.esp_box_style, box_styles, std::size(box_styles), 10, content_left, y, input);
@@ -1948,7 +2221,7 @@ namespace kopt
             {
                 static constexpr const wchar_t* box_styles[]{L"Full box", L"Corner box"};
                 static constexpr const wchar_t* sides[]{L"Top", L"Left", L"Right", L"Bottom"};
-                text(L"WORLD STYLE · dinos, structures, turrets, drops and caches", {content_left + 2.0F, y,
+                text(L"WORLD STYLE | dinos, structures, turrets, drops and caches", {content_left + 2.0F, y,
                     frame.right - 32.0F, y + 24.0F}, accent, 11.0F);
                 y += 28.0F;
                 combo(L"Box style", settings.world_box_style, box_styles, std::size(box_styles), 14, content_left, y, input);
@@ -2090,6 +2363,12 @@ namespace kopt
                     if (settings.structure_grouping)
                         slider(L"Structure group radius", settings.structure_group_radius_m, 2.0F, 50.0F,
                             content_left, y, input, L" m");
+                    checkbox(L"Group dense wild dinos", settings.dino_grouping, content_left, y, input);
+                    if (settings.dino_grouping)
+                        slider(L"Wild dino group radius", settings.dino_group_radius_m, 2.0F, 50.0F,
+                            content_left, y, input, L" m");
+                    text(L"Tamed and hostile (team) dinos are never grouped, only unowned wild ones.",
+                        {content_left + 2.0F, y + 4.0F, frame.right - 32.0F, y + 34.0F}, text_secondary, 11.0F);
                 }
             }
             else if (active_esp_section_ == 7)
@@ -2192,7 +2471,7 @@ namespace kopt
                     int live_types{};
                     for (const auto& item : structure_catalog_) if (item.live_instances > 0) ++live_types;
                     text(L"Selected " + std::to_wstring(selected_count) + L" / catalog " +
-                        std::to_wstring(structure_catalog_.size()) + L" · live types " +
+                        std::to_wstring(structure_catalog_.size()) + L" | live types " +
                         std::to_wstring(live_types),
                         {content_left + 2.0F, y, content_left + 500.0F, y + 22.0F}, text_secondary, 11.0F);
                     y += 25.0F;
@@ -2233,37 +2512,185 @@ namespace kopt
                     }
                 }
             }
+            else if (active_esp_section_ == 8)
+            {
+                // Category colors now live inline next to their own toggles
+                // (Targets / Player / OSD). What is left here is the handful with
+                // no natural home of their own.
+                text(L"Most colors now sit next to the setting they belong to: entity colors in Targets, player states in Player, OSD colors in OSD.",
+                    {content_left + 2.0F, y, frame.right - 32.0F, y + 40.0F}, text_secondary, 11.0F);
+                y += 46.0F;
+                color_picker(L"Menu accent", settings.menu_accent_color, 220, content_left, y, input);
+                color_picker(L"Health bar", settings.health_color, 221, content_left, y, input);
+                color_picker(L"Torpor bar", settings.torpor_color, 222, content_left, y, input);
+                color_picker(L"Local chams", settings.local_chams_color, 223, content_left, y, input);
+            }
             else
             {
-                static constexpr const wchar_t* color_targets[]{
-                    L"Menu accent", L"Own tribe", L"Allies", L"Enemies", L"Player awake",
-                    L"Player sleeping", L"Player knocked out", L"Player dead", L"Player occluded",
-                    L"Wild dinos", L"Structures", L"Health", L"Torpor", L"Local chams"};
-                combo(L"Color target", color_target_, color_targets, std::size(color_targets), 19,
-                    content_left, y, input);
-                Color* selected = color_target_ == 0 ? &settings.menu_accent_color :
-                    color_target_ == 1 ? &settings.own_color :
-                    color_target_ == 2 ? &settings.ally_color :
-                    color_target_ == 3 ? &settings.enemy_color :
-                    color_target_ == 4 ? &settings.player_awake_color :
-                    color_target_ == 5 ? &settings.player_sleeping_color :
-                    color_target_ == 6 ? &settings.player_knocked_out_color :
-                    color_target_ == 7 ? &settings.player_dead_color :
-                    color_target_ == 8 ? &settings.player_occluded_color :
-                    color_target_ == 9 ? &settings.wild_color :
-                    color_target_ == 10 ? &settings.structure_color :
-                    color_target_ == 11 ? &settings.health_color :
-                    color_target_ == 12 ? &settings.torpor_color : &settings.local_chams_color;
-                fill({content_left + 2.0F, y, content_left + 500.0F, y + 34.0F},
-                    {selected->r, selected->g, selected->b, 1.0F});
-                stroke({content_left + 2.0F, y, content_left + 500.0F, y + 34.0F}, text_secondary);
+                static constexpr const wchar_t* osd_pages[]{L"Active", L"Full loot", L"Element", L"Settings"};
+                for (int page = 0; page < 4; ++page)
+                {
+                    const float page_left = content_left + static_cast<float>(page) * 128.0F;
+                    if (button(osd_pages[page], {page_left, y, page_left + 120.0F, y + 34.0F},
+                        horde_settings_page_ == page, input)) horde_settings_page_ = page;
+                }
                 y += 48.0F;
-                slider(L"Red", selected->r, 0.0F, 1.0F, content_left, y, input);
-                slider(L"Green", selected->g, 0.0F, 1.0F, content_left, y, input);
-                slider(L"Blue", selected->b, 0.0F, 1.0F, content_left, y, input);
-                slider(L"Opacity", selected->a, 0.10F, 1.0F, content_left, y, input);
-                text(L"All color changes are live and saved with the current configuration.",
-                    {content_left + 2.0F, y + 4.0F, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
+
+                const Snapshot& horde_snapshot = runtime.snapshot();
+                std::vector<const Actor*> osds;
+                std::vector<const Actor*> nodes;
+                for (const Actor& actor : horde_snapshot.actors)
+                {
+                    if (actor.stale_seconds > 0.0F) continue;
+                    if (actor.kind == ActorKind::horde_crate) osds.push_back(&actor);
+                    else if (actor.kind == ActorKind::element_node) nodes.push_back(&actor);
+                }
+                const auto by_distance = [&](const Actor* left_actor, const Actor* right_actor) {
+                    return distance3(left_actor->position, horde_snapshot.local_position) <
+                        distance3(right_actor->position, horde_snapshot.local_position);
+                };
+                std::ranges::sort(osds, by_distance);
+                std::ranges::sort(nodes, by_distance);
+
+                const Actor* selected{};
+                for (const Actor* actor : osds)
+                    if (actor->address == horde_selected_address_) selected = actor;
+                if (!selected && !osds.empty())
+                {
+                    selected = osds.front();
+                    horde_selected_address_ = selected->address;
+                    horde_loot_page_ = 0;
+                }
+
+                if (horde_settings_page_ == 0)
+                {
+                    const Color state_color = osds.empty() ? text_secondary : Color{1.0F, 0.48F, 0.12F, 1.0F};
+                    text(osds.empty() ? L"NO ACTIVE OSD REPLICATED" :
+                        L"ACTIVE OSD: " + std::to_wstring(osds.size()),
+                        {content_left + 2.0F, y, frame.right - 32.0F, y + 30.0F}, state_color, 14.0F);
+                    y += 38.0F;
+                    if (osds.empty())
+                    {
+                        text(L"The panel is map-wide: an OSD appears as soon as the server replicates its actor.",
+                            {content_left + 2.0F, y, frame.right - 32.0F, y + 50.0F}, text_secondary, 12.0F);
+                    }
+                    else
+                    {
+                        for (std::size_t index = 0; index < osds.size() && index < 9; ++index)
+                        {
+                            const Actor& actor = *osds[index];
+                            const float distance_m = distance3(actor.position, horde_snapshot.local_position) / 100.0F;
+                            std::wstring row = std::to_wstring(index + 1) + L". " + actor.name;
+                            row += L"  |  WAVE " + (actor.horde_wave >= 0 ? std::to_wstring(actor.horde_wave) : L"?");
+                            row += L"  |  " + fixed(distance_m, 0) + L" m";
+                            row += actor.reward_exact ? L"  |  LOOT READY" : L"  |  RNG PENDING";
+                            if (button(row, {content_left, y, frame.right - 30.0F, y + 36.0F},
+                                actor.address == horde_selected_address_, input))
+                            {
+                                horde_selected_address_ = actor.address;
+                                horde_loot_page_ = 0;
+                                horde_settings_page_ = 1;
+                            }
+                            y += 42.0F;
+                        }
+                    }
+                }
+                else if (horde_settings_page_ == 1)
+                {
+                    if (!selected)
+                    {
+                        text(L"No active OSD is currently replicated.",
+                            {content_left + 2.0F, y, frame.right - 32.0F, y + 34.0F}, text_secondary, 13.0F);
+                    }
+                    else
+                    {
+                        std::wstring title = selected->name + L"  |  WAVE " +
+                            (selected->horde_wave >= 0 ? std::to_wstring(selected->horde_wave) : L"?");
+                        text(title, {content_left + 2.0F, y, frame.right - 32.0F, y + 30.0F},
+                            selected->reward_exact ? success : warning, 14.0F);
+                        y += 34.0F;
+
+                        std::vector<std::wstring> loot_lines;
+                        const std::wstring& preview = selected->reward_preview;
+                        std::size_t begin{};
+                        while (begin <= preview.size())
+                        {
+                            const std::size_t end = preview.find(L'\n', begin);
+                            loot_lines.push_back(preview.substr(begin,
+                                end == std::wstring::npos ? std::wstring::npos : end - begin));
+                            if (end == std::wstring::npos) break;
+                            begin = end + 1;
+                        }
+                        if (loot_lines.empty() || (loot_lines.size() == 1 && loot_lines.front().empty()))
+                            loot_lines = {L"Loot inventory has not replicated yet."};
+                        constexpr int rows_per_page = 9;
+                        const int page_count = std::max(1, static_cast<int>((loot_lines.size() + rows_per_page - 1) /
+                            rows_per_page));
+                        horde_loot_page_ = std::clamp(horde_loot_page_, 0, page_count - 1);
+                        const int first = horde_loot_page_ * rows_per_page;
+                        const int last = std::min(static_cast<int>(loot_lines.size()), first + rows_per_page);
+                        for (int index = first; index < last; ++index)
+                        {
+                            const Rect row{content_left, y, frame.right - 30.0F, y + 34.0F};
+                            fill(row, index % 2 == 0 ? surface : Color{0.045F, 0.032F, 0.062F, 0.98F});
+                            text(loot_lines[static_cast<std::size_t>(index)],
+                                {row.left + 10.0F, row.top + 5.0F, row.right - 8.0F, row.bottom - 3.0F},
+                                index == 0 ? accent : text_primary, 11.0F);
+                            y += 37.0F;
+                        }
+                        if (page_count > 1)
+                        {
+                            y += 4.0F;
+                            if (button(L"Previous", {content_left, y, content_left + 110.0F, y + 34.0F},
+                                horde_loot_page_ > 0, input) && horde_loot_page_ > 0) --horde_loot_page_;
+                            if (button(L"Next", {content_left + 120.0F, y, content_left + 230.0F, y + 34.0F},
+                                horde_loot_page_ + 1 < page_count, input) && horde_loot_page_ + 1 < page_count)
+                                ++horde_loot_page_;
+                            text(std::to_wstring(horde_loot_page_ + 1) + L" / " + std::to_wstring(page_count) +
+                                L"  (" + std::to_wstring(loot_lines.size()) + L" rows)",
+                                {content_left + 248.0F, y, frame.right - 30.0F, y + 34.0F}, text_secondary, 11.0F);
+                        }
+                    }
+                }
+                else if (horde_settings_page_ == 2)
+                {
+                    text(L"REPLICATED ELEMENT NODES: " + std::to_wstring(nodes.size()),
+                        {content_left + 2.0F, y, frame.right - 32.0F, y + 30.0F},
+                        nodes.empty() ? text_secondary : Color{0.18F, 0.88F, 1.0F, 1.0F}, 14.0F);
+                    y += 38.0F;
+                    for (std::size_t index = 0; index < nodes.size() && index < 10; ++index)
+                    {
+                        const Actor& actor = *nodes[index];
+                        std::wstring row = std::to_wstring(index + 1) + L". " + actor.name + L"  |  " +
+                            fixed(distance3(actor.position, horde_snapshot.local_position) / 100.0F, 0) + L" m";
+                        if (!actor.reward_preview.empty()) row += L"  |  " + actor.reward_preview;
+                        fill({content_left, y, frame.right - 30.0F, y + 36.0F},
+                            index % 2 == 0 ? surface : Color{0.045F, 0.032F, 0.062F, 0.98F});
+                        text(row, {content_left + 10.0F, y + 5.0F, frame.right - 38.0F, y + 32.0F},
+                            text_primary, 11.0F);
+                        y += 40.0F;
+                    }
+                }
+                else
+                {
+                    checkbox(L"Draw OSD + Element Nodes in world ESP", settings.horde_esp,
+                        content_left, y, input);
+                    color_picker(L"OSD crate color", settings.horde_crate_color, 230, content_left, y, input);
+                    color_picker(L"Element node color", settings.element_node_color, 231, content_left, y, input);
+                    checkbox(L"Show compact reward state in world label", settings.horde_reward_preview,
+                        content_left, y, input);
+                    checkbox(L"Persistent map alert with active OSD wave", settings.horde_map_alert,
+                        content_left, y, input);
+                    slider(L"OSD render distance", settings.horde_distance_m, 1000.0F, 100000.0F,
+                        content_left, y, input, L" m");
+                    text(L"The OSD table always keeps the complete replicated inventory. World labels show only the first summary line.",
+                        {content_left + 2.0F, y + 6.0F, frame.right - 32.0F, y + 58.0F},
+                        text_secondary, 12.0F);
+                    y += 68.0F;
+                    text(L"Map-wide detection depends on the server replicating the OSD actor; the new 100 km range no longer clips it at the normal ESP distance.",
+                        {content_left + 2.0F, y, frame.right - 32.0F, y + 58.0F},
+                        text_secondary, 11.0F);
+                }
             }
             // Preview is a dedicated side window and remains visible for every ESP
             // section. It follows the menu and stays on its right whenever space allows.
@@ -2307,143 +2734,6 @@ namespace kopt
         }
         else if (active_tab_ == 3)
         {
-            static constexpr const wchar_t* layouts[]{L"Everyday", L"Testing", L"Freecam", L"Streamer"};
-            combo(L"Active menu layout", settings.active_layout, layouts, std::size(layouts), 32,
-                content_left, y, input);
-            slider(L"UI scale", settings.ui_scale, 0.75F, 1.50F, content_left, y, input, L" x");
-            text(L"Each layout stores menu size/position, UI scale, hotkey list and radar position independently.",
-                {content_left + 2.0F, y, frame.right - 32.0F, y + 38.0F}, text_secondary, 10.0F);
-            y += 42.0F;
-            checkbox(L"Runtime debug panel", settings.debug_panel, content_left, y, input);
-            slider(L"Live actor refresh", settings.refresh_interval_ms, 16.0F, 500.0F, content_left, y, input, L" ms");
-            slider(L"World actor discovery", settings.discovery_interval_ms, 250.0F, 5000.0F, content_left, y, input, L" ms");
-            slider(L"Discovery frame budget", settings.discovery_budget_ms, 1.0F, 20.0F, content_left, y, input, L" ms");
-            text(L"Positions, vitals and bones use the fast path; class discovery uses the slow path.",
-                {content_left, y + 2.0F, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
-            y += 48.0F;
-            if (button(L"Save configuration", {content_left, y, content_left + 190.0F, y + 40.0F}, true, input))
-            {
-                settings.normalize();
-                settings.save(settings_path);
-                toast_ = L"Configuration saved";
-                toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-            }
-            y += 54.0F;
-
-            text(L"LOCAL PROFILES", {content_left + 2.0F, y, frame.right - 32.0F, y + 24.0F}, accent, 11.0F);
-            y += 28.0F;
-            text_input(L"Profile name", profile_name_, 30, content_left, y, input, 32);
-
-            const std::filesystem::path profiles_directory = settings_path.parent_path() / L"profiles";
-            std::vector<std::filesystem::path> profiles;
-            std::error_code profile_error;
-            if (std::filesystem::exists(profiles_directory, profile_error))
-            {
-                for (std::filesystem::directory_iterator iterator(profiles_directory, profile_error), end;
-                    !profile_error && iterator != end; iterator.increment(profile_error))
-                {
-                    if (iterator->is_regular_file(profile_error) && iterator->path().extension() == L".ini")
-                        profiles.push_back(iterator->path());
-                }
-            }
-            std::sort(profiles.begin(), profiles.end(), [](const auto& left, const auto& right) {
-                return lower_copy(left.filename().wstring()) < lower_copy(right.filename().wstring());
-            });
-            if (profiles.empty()) profile_index_ = 0;
-            else profile_index_ %= profiles.size();
-
-            if (button(L"Save profile", {content_left, y, content_left + 156.0F, y + 38.0F}, true, input))
-            {
-                const std::wstring safe_name = safe_profile_name(profile_name_);
-                std::error_code create_error;
-                std::filesystem::create_directories(profiles_directory, create_error);
-                if (safe_name.empty() || create_error)
-                    toast_ = L"Profile name or folder is invalid";
-                else
-                {
-                    settings.normalize();
-                    const bool saved = settings.save(profiles_directory / (safe_name + L".ini"));
-                    profile_name_ = safe_name;
-                    toast_ = saved ? L"Profile saved: " + safe_name : L"Could not save profile";
-                }
-                toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-            }
-            if (button(L"Load profile", {content_left + 166.0F, y, content_left + 322.0F, y + 38.0F}, true, input))
-            {
-                const std::wstring safe_name = safe_profile_name(profile_name_);
-                Settings loaded;
-                if (!safe_name.empty() && loaded.load(profiles_directory / (safe_name + L".ini")))
-                {
-                    loaded.menu_open = true;
-                    settings = std::move(loaded);
-                    loaded_layout_ = -1;
-                    profile_name_ = safe_name;
-                    toast_ = L"Profile loaded: " + safe_name;
-                }
-                else toast_ = L"Profile not found: " + safe_name;
-                toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-            }
-            y += 48.0F;
-            if (!profiles.empty())
-            {
-                if (button(L"Previous", {content_left, y, content_left + 110.0F, y + 34.0F}, true, input))
-                {
-                    profile_index_ = (profile_index_ + profiles.size() - 1) % profiles.size();
-                    profile_name_ = profiles[profile_index_].stem().wstring();
-                    profile_delete_confirmation_.clear();
-                }
-                if (button(L"Next", {content_left + 120.0F, y, content_left + 230.0F, y + 34.0F}, true, input))
-                {
-                    profile_index_ = (profile_index_ + 1) % profiles.size();
-                    profile_name_ = profiles[profile_index_].stem().wstring();
-                    profile_delete_confirmation_.clear();
-                }
-                text(L"Selected: " + profiles[profile_index_].stem().wstring(),
-                    {content_left + 242.0F, y + 3.0F, frame.right - 32.0F, y + 32.0F}, text_secondary, 12.0F);
-                y += 44.0F;
-                const std::filesystem::path selected_profile = profiles[profile_index_];
-                const std::wstring selected_name = selected_profile.stem().wstring();
-                const auto confirmation_now = std::chrono::steady_clock::now();
-                if (confirmation_now >= profile_delete_confirmation_until_)
-                    profile_delete_confirmation_.clear();
-                const bool confirming = profile_delete_confirmation_ == selected_name;
-                if (button(confirming ? L"Confirm delete " + selected_name : L"Delete selected profile",
-                    {content_left, y, content_left + 250.0F, y + 36.0F}, false, input))
-                {
-                    if (!confirming)
-                    {
-                        profile_delete_confirmation_ = selected_name;
-                        profile_delete_confirmation_until_ = confirmation_now + std::chrono::seconds(6);
-                        toast_ = L"Press delete again to confirm: " + selected_name;
-                    }
-                    else
-                    {
-                        std::error_code delete_error;
-                        const bool safe_target = selected_profile.parent_path() == profiles_directory &&
-                            selected_profile.extension() == L".ini" &&
-                            !std::filesystem::is_symlink(selected_profile, delete_error);
-                        const bool removed = safe_target && !delete_error &&
-                            std::filesystem::remove(selected_profile, delete_error);
-                        toast_ = removed && !delete_error ? L"Profile deleted: " + selected_name :
-                            L"Could not delete profile: " + selected_name;
-                        if (removed)
-                        {
-                            profile_name_ = L"default";
-                            profile_index_ = 0;
-                        }
-                        profile_delete_confirmation_.clear();
-                    }
-                    toast_until_ = confirmation_now + std::chrono::seconds(3);
-                }
-                text(L"Only the selected file inside profiles\\ is removed; the base configuration is protected.",
-                    {content_left + 262.0F, y, frame.right - 32.0F, y + 38.0F}, text_secondary, 10.0F);
-            }
-            else
-                text(L"No saved profiles yet.", {content_left + 2.0F, y,
-                    frame.right - 32.0F, y + 32.0F}, text_secondary, 12.0F);
-        }
-        else if (active_tab_ == 4)
-        {
             static constexpr const wchar_t* styles[]{L"Solid", L"Wireframe", L"Solid + wireframe"};
             checkbox(L"First-person hands + weapon", settings.local_chams, content_left, y, input);
             combo(L"Local chams style", settings.local_chams_style, styles, std::size(styles), 20,
@@ -2463,160 +2753,369 @@ namespace kopt
             text(L"Only AShooterCharacter::Mesh1P and AShooterWeapon::Mesh1P are modified. Third-person body, enemies and dinos stay untouched; all flags are restored on disable, weapon swap and world change.",
                 {content_left + 2.0F, y, frame.right - 32.0F, y + 72.0F}, text_secondary, 12.0F);
         }
-        else if (active_tab_ == 5)
+        else if (active_tab_ == 4)
         {
-            keybind(L"Menu toggle", settings.menu_key, BindingTarget::menu, content_left, y, input);
-            keybind(L"Unload DLL", settings.unload_key, BindingTarget::unload, content_left, y, input);
-            keybind(L"Aim activation", settings.aim_key, BindingTarget::aim, content_left, y, input);
-            keybind(L"Dino aim activation", settings.dino_aim_key, BindingTarget::dino_aim, content_left, y, input);
-            keybind(L"Freecam toggle", settings.freecam_key, BindingTarget::freecam, content_left, y, input);
-            keybind(L"ESP toggle", settings.esp_toggle_key, BindingTarget::esp_toggle, content_left, y, input);
-            keybind(L"Panic / restore", settings.panic_key, BindingTarget::panic, content_left, y, input);
-            text(L"Click Rebind, then press a keyboard key or mouse button. Esc cancels.",
-                {content_left, y + 8.0F, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
-            if (button(L"Save bindings", {content_left, y + 54.0F, content_left + 190.0F, y + 94.0F}, true, input))
+            static constexpr const wchar_t* settings_pages[]{L"General", L"Bindings", L"Hotkeys"};
+            for (int page = 0; page < static_cast<int>(std::size(settings_pages)); ++page)
             {
-                settings.save(settings_path);
-                toast_ = L"Bindings saved";
-                toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                const float page_left = content_left + static_cast<float>(page) * 128.0F;
+                if (button(settings_pages[page], {page_left, y, page_left + 120.0F, y + 34.0F},
+                    settings_tab_page_ == page, input)) settings_tab_page_ = page;
             }
-        }
-        else if (active_tab_ == 6)
-        {
-            checkbox(L"Show active bind list", settings.show_hotkey_list, content_left, y, input);
-            slider(L"List horizontal position", settings.hotkey_list_x, 0.05F, 0.95F, content_left, y, input);
-            slider(L"List vertical position", settings.hotkey_list_y, 0.05F, 0.95F, content_left, y, input);
-            text(L"CONFIGURED HOTKEYS", {content_left + 2.0F, y, frame.right - 32.0F, y + 24.0F}, accent, 11.0F);
-            y += 28.0F;
+            y += 48.0F;
+            if (settings_tab_page_ == 0)
+            {
+                static constexpr const wchar_t* layouts[]{L"Everyday", L"Testing", L"Freecam", L"Streamer"};
+                combo(L"Active menu layout", settings.active_layout, layouts, std::size(layouts), 32,
+                    content_left, y, input);
+                slider(L"UI scale", settings.ui_scale, 0.75F, 1.50F, content_left, y, input, L" x");
+                text(L"Each layout stores menu size/position, UI scale, hotkey list and radar position independently.",
+                    {content_left + 2.0F, y, frame.right - 32.0F, y + 38.0F}, text_secondary, 10.0F);
+                y += 42.0F;
+                checkbox(L"Runtime debug panel", settings.debug_panel, content_left, y, input);
+                slider(L"Live actor refresh", settings.refresh_interval_ms, 16.0F, 500.0F, content_left, y, input, L" ms");
+                slider(L"World actor discovery", settings.discovery_interval_ms, 250.0F, 5000.0F, content_left, y, input, L" ms");
+                slider(L"Discovery frame budget", settings.discovery_budget_ms, 1.0F, 20.0F, content_left, y, input, L" ms");
+                text(L"Positions, vitals and bones use the fast path; class discovery uses the slow path.",
+                    {content_left, y + 2.0F, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
+                y += 48.0F;
+                if (button(L"Save configuration", {content_left, y, content_left + 190.0F, y + 40.0F}, true, input))
+                {
+                    settings.normalize();
+                    settings.save(settings_path);
+                    toast_ = L"Configuration saved";
+                    toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                }
+                y += 54.0F;
 
-            struct HotkeyEntry
-            {
-                std::wstring id;
-                std::wstring label;
-                std::wstring category;
-                std::uint32_t key{};
-                std::int32_t mode{};
-                bool active{};
-                bool shown{};
-                bool special{};
-                bool visibility_control{};
-            };
-            std::vector<HotkeyEntry> entries;
-            entries.push_back({L"system.menu", L"Menu toggle", L"System", settings.menu_key,
-                1, settings.menu_open, false, true, false});
-            entries.push_back({L"system.unload", L"Unload DLL", L"System", settings.unload_key,
-                -1, false, false, true, false});
-            entries.push_back({L"system.freecam", L"Quick freecam toggle", L"System", settings.freecam_key,
-                1, settings.freecam, false, true, false});
-            entries.push_back({L"system.esp", L"Quick ESP toggle", L"System", settings.esp_toggle_key,
-                1, settings.esp_enabled, false, true, false});
-            entries.push_back({L"system.panic", L"Panic / restore", L"System", settings.panic_key,
-                -1, false, false, true, false});
-            entries.push_back({L"aim.player", L"Player aim", L"Aim", settings.aim_key,
-                settings.aim_activation_mode, runtime.snapshot().player_aim_active, settings.aim_bind_show, true, true});
-            entries.push_back({L"aim.dino", L"Dino aim", L"Aim", settings.dino_aim_key,
-                settings.dino_aim_activation_mode, runtime.snapshot().dino_aim_active,
-                settings.dino_aim_bind_show, true, true});
-            for (const FeatureBinding& binding : settings.feature_bindings)
-            {
-                if (binding.key == 0) continue;
-                const FeatureDescriptor* descriptor = feature_descriptor(binding.id);
-                if (descriptor == nullptr) continue;
-                const auto state = std::find_if(feature_binding_runtime_.begin(), feature_binding_runtime_.end(),
-                    [&](const auto& item) { return item.id == binding.id; });
-                entries.push_back({binding.id, descriptor->label, descriptor->category, binding.key, binding.mode,
-                    state != feature_binding_runtime_.end() && state->active,
-                    binding.show_in_list, false, true});
+                text(L"LOCAL PROFILES", {content_left + 2.0F, y, frame.right - 32.0F, y + 24.0F}, accent, 11.0F);
+                y += 28.0F;
+                text_input(L"Profile name", profile_name_, 30, content_left, y, input, 32);
+
+                const std::filesystem::path profiles_directory = settings_path.parent_path() / L"profiles";
+                std::vector<std::filesystem::path> profiles;
+                std::error_code profile_error;
+                if (std::filesystem::exists(profiles_directory, profile_error))
+                {
+                    for (std::filesystem::directory_iterator iterator(profiles_directory, profile_error), end;
+                        !profile_error && iterator != end; iterator.increment(profile_error))
+                    {
+                        if (iterator->is_regular_file(profile_error) && iterator->path().extension() == L".ini")
+                            profiles.push_back(iterator->path());
+                    }
+                }
+                std::sort(profiles.begin(), profiles.end(), [](const auto& left, const auto& right) {
+                    return lower_copy(left.filename().wstring()) < lower_copy(right.filename().wstring());
+                });
+                if (profiles.empty()) profile_index_ = 0;
+                else profile_index_ %= profiles.size();
+
+                if (button(L"Save profile", {content_left, y, content_left + 156.0F, y + 38.0F}, true, input))
+                {
+                    const std::wstring safe_name = safe_profile_name(profile_name_);
+                    std::error_code create_error;
+                    std::filesystem::create_directories(profiles_directory, create_error);
+                    if (safe_name.empty() || create_error)
+                        toast_ = L"Profile name or folder is invalid";
+                    else
+                    {
+                        settings.normalize();
+                        const bool saved = settings.save(profiles_directory / (safe_name + L".ini"));
+                        profile_name_ = safe_name;
+                        toast_ = saved ? L"Profile saved: " + safe_name : L"Could not save profile";
+                    }
+                    toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                }
+                if (button(L"Load profile", {content_left + 166.0F, y, content_left + 322.0F, y + 38.0F}, true, input))
+                {
+                    const std::wstring safe_name = safe_profile_name(profile_name_);
+                    Settings loaded;
+                    if (!safe_name.empty() && loaded.load(profiles_directory / (safe_name + L".ini")))
+                    {
+                        loaded.menu_open = true;
+                        settings = std::move(loaded);
+                        loaded_layout_ = -1;
+                        profile_name_ = safe_name;
+                        toast_ = L"Profile loaded: " + safe_name;
+                    }
+                    else toast_ = L"Profile not found: " + safe_name;
+                    toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                }
+                y += 48.0F;
+                if (!profiles.empty())
+                {
+                    if (button(L"Previous", {content_left, y, content_left + 110.0F, y + 34.0F}, true, input))
+                    {
+                        profile_index_ = (profile_index_ + profiles.size() - 1) % profiles.size();
+                        profile_name_ = profiles[profile_index_].stem().wstring();
+                        profile_delete_confirmation_.clear();
+                    }
+                    if (button(L"Next", {content_left + 120.0F, y, content_left + 230.0F, y + 34.0F}, true, input))
+                    {
+                        profile_index_ = (profile_index_ + 1) % profiles.size();
+                        profile_name_ = profiles[profile_index_].stem().wstring();
+                        profile_delete_confirmation_.clear();
+                    }
+                    text(L"Selected: " + profiles[profile_index_].stem().wstring(),
+                        {content_left + 242.0F, y + 3.0F, frame.right - 32.0F, y + 32.0F}, text_secondary, 12.0F);
+                    y += 44.0F;
+                    const std::filesystem::path selected_profile = profiles[profile_index_];
+                    const std::wstring selected_name = selected_profile.stem().wstring();
+                    const auto confirmation_now = std::chrono::steady_clock::now();
+                    if (confirmation_now >= profile_delete_confirmation_until_)
+                        profile_delete_confirmation_.clear();
+                    const bool confirming = profile_delete_confirmation_ == selected_name;
+                    if (button(confirming ? L"Confirm delete " + selected_name : L"Delete selected profile",
+                        {content_left, y, content_left + 250.0F, y + 36.0F}, false, input))
+                    {
+                        if (!confirming)
+                        {
+                            profile_delete_confirmation_ = selected_name;
+                            profile_delete_confirmation_until_ = confirmation_now + std::chrono::seconds(6);
+                            toast_ = L"Press delete again to confirm: " + selected_name;
+                        }
+                        else
+                        {
+                            std::error_code delete_error;
+                            const bool safe_target = selected_profile.parent_path() == profiles_directory &&
+                                selected_profile.extension() == L".ini" &&
+                                !std::filesystem::is_symlink(selected_profile, delete_error);
+                            const bool removed = safe_target && !delete_error &&
+                                std::filesystem::remove(selected_profile, delete_error);
+                            toast_ = removed && !delete_error ? L"Profile deleted: " + selected_name :
+                                L"Could not delete profile: " + selected_name;
+                            if (removed)
+                            {
+                                profile_name_ = L"default";
+                                profile_index_ = 0;
+                            }
+                            profile_delete_confirmation_.clear();
+                        }
+                        toast_until_ = confirmation_now + std::chrono::seconds(3);
+                    }
+                    text(L"Only the selected file inside profiles\\ is removed; the base configuration is protected.",
+                        {content_left + 262.0F, y, frame.right - 32.0F, y + 38.0F}, text_secondary, 10.0F);
+                }
+                else
+                    text(L"No saved profiles yet.", {content_left + 2.0F, y,
+                        frame.right - 32.0F, y + 32.0F}, text_secondary, 12.0F);
             }
-            std::unordered_map<std::uint32_t, int> bind_usage;
-            for (const HotkeyEntry& entry : entries)
-                if (entry.key != 0) ++bind_usage[entry.key];
-            const int conflict_keys = static_cast<int>(std::count_if(bind_usage.begin(), bind_usage.end(),
-                [](const auto& item) { return item.second > 1; }));
-            if (conflict_keys > 0)
+            else if (settings_tab_page_ == 1)
             {
-                text(L"BIND CONFLICTS: " + std::to_wstring(conflict_keys),
-                    {content_left + 2.0F, y, content_left + 220.0F, y + 28.0F}, warning, 11.0F);
-                if (button(L"Open rebind panel", {content_left + 232.0F, y,
-                    content_left + 392.0F, y + 28.0F}, false, input)) active_tab_ = 5;
-                y += 36.0F;
+                keybind(L"Menu toggle", settings.menu_key, BindingTarget::menu, content_left, y, input);
+                keybind(L"Unload DLL", settings.unload_key, BindingTarget::unload, content_left, y, input);
+                keybind(L"Aim activation", settings.aim_key, BindingTarget::aim, content_left, y, input);
+                keybind(L"Dino aim activation", settings.dino_aim_key, BindingTarget::dino_aim, content_left, y, input);
+                keybind(L"Freecam toggle", settings.freecam_key, BindingTarget::freecam, content_left, y, input);
+                keybind(L"ESP toggle", settings.esp_toggle_key, BindingTarget::esp_toggle, content_left, y, input);
+                keybind(L"Panic / restore", settings.panic_key, BindingTarget::panic, content_left, y, input);
+                text(L"Click Rebind, then press a keyboard key or mouse button. Esc cancels.",
+                    {content_left, y + 8.0F, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
+                if (button(L"Save bindings", {content_left, y + 54.0F, content_left + 190.0F, y + 94.0F}, true, input))
+                {
+                    settings.save(settings_path);
+                    toast_ = L"Bindings saved";
+                    toast_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                }
             }
             else
             {
-                text(L"No bind conflicts", {content_left + 2.0F, y,
-                    frame.right - 32.0F, y + 24.0F}, success, 10.0F);
+                checkbox(L"Show active bind list", settings.show_hotkey_list, content_left, y, input);
+                slider(L"List horizontal position", settings.hotkey_list_x, 0.05F, 0.95F, content_left, y, input);
+                slider(L"List vertical position", settings.hotkey_list_y, 0.05F, 0.95F, content_left, y, input);
+                text(L"CONFIGURED HOTKEYS", {content_left + 2.0F, y, frame.right - 32.0F, y + 24.0F}, accent, 11.0F);
                 y += 28.0F;
-            }
-            const int entries_per_page = std::clamp(
-                static_cast<int>((frame.bottom - 88.0F - y) / 50.0F), 1, 6);
-            const int page_count = std::max(1, static_cast<int>((entries.size() + entries_per_page - 1) / entries_per_page));
-            hotkey_page_ = std::clamp(hotkey_page_, 0, page_count - 1);
-            const int begin = hotkey_page_ * entries_per_page;
-            const int end = std::min(static_cast<int>(entries.size()), begin + entries_per_page);
-            if (entries.empty())
-            {
-                text(L"No feature binds yet. Right-click any checkbox or switch to add one.",
-                    {content_left + 2.0F, y, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
-                y += 48.0F;
-            }
-            for (int index = begin; index < end; ++index)
-            {
-                const HotkeyEntry& entry = entries[static_cast<std::size_t>(index)];
-                const bool conflict = entry.key != 0 && bind_usage[entry.key] > 1;
-                const Rect row{content_left, y, content_left + content_width_, y + 44.0F};
-                fill(row, conflict ? Color{0.20F, 0.12F, 0.04F, 0.96F} :
-                    (entry.active ? Color{accent_dim.r, accent_dim.g, accent_dim.b, 0.72F} : surface));
-                fill({row.left, row.top, row.left + 3.0F, row.bottom},
-                    conflict ? warning : (entry.active ? success : accent_dim));
-                text(entry.label, {row.left + 12.0F, row.top + 3.0F, row.left + 245.0F, row.top + 24.0F},
-                    text_primary, 12.0F);
-                text(entry.category + L" · " + key_name(entry.key) + L" · " +
-                    (entry.mode < 0 ? L"Action" : entry.mode == 0 ? L"Hold" :
-                        entry.mode == 1 ? L"Toggle" : L"Always"),
-                    {row.left + 12.0F, row.top + 22.0F, row.left + 350.0F, row.bottom - 2.0F},
-                    text_secondary, 10.0F);
-                if (conflict)
-                    text(L"CONFLICT", {row.left + 350.0F, row.top + 4.0F,
-                        row.right - 164.0F, row.top + 22.0F}, warning, 9.0F, TextAlign::right);
-                if (entry.visibility_control && button(entry.shown ? L"Eye" : L"Hidden",
-                    {row.right - 158.0F, row.top + 7.0F, row.right - 82.0F, row.bottom - 7.0F}, entry.shown, input))
+
+                struct HotkeyEntry
                 {
-                    if (entry.id == L"aim.player") settings.aim_bind_show = !settings.aim_bind_show;
-                    else if (entry.id == L"aim.dino") settings.dino_aim_bind_show = !settings.dino_aim_bind_show;
-                    else if (FeatureBinding* binding = settings.find_feature_binding(entry.id))
-                        binding->show_in_list = !binding->show_in_list;
-                }
-                else if (!entry.visibility_control)
-                    text(L"SYSTEM", {row.right - 158.0F, row.top + 7.0F,
-                        row.right - 82.0F, row.bottom - 7.0F}, text_secondary, 9.0F, TextAlign::center);
-                if (!entry.special && button(L"Remove",
-                    {row.right - 76.0F, row.top + 7.0F, row.right - 8.0F, row.bottom - 7.0F}, false, input))
+                    std::wstring id;
+                    std::wstring label;
+                    std::wstring category;
+                    std::uint32_t key{};
+                    std::int32_t mode{};
+                    bool active{};
+                    bool shown{};
+                    bool special{};
+                    bool visibility_control{};
+                };
+                std::vector<HotkeyEntry> entries;
+                entries.push_back({L"system.menu", L"Menu toggle", L"System", settings.menu_key,
+                    1, settings.menu_open, false, true, false});
+                entries.push_back({L"system.unload", L"Unload DLL", L"System", settings.unload_key,
+                    -1, false, false, true, false});
+                entries.push_back({L"system.freecam", L"Quick freecam toggle", L"System", settings.freecam_key,
+                    1, settings.freecam, false, true, false});
+                entries.push_back({L"system.esp", L"Quick ESP toggle", L"System", settings.esp_toggle_key,
+                    1, settings.esp_enabled, false, true, false});
+                entries.push_back({L"system.panic", L"Panic / restore", L"System", settings.panic_key,
+                    -1, false, false, true, false});
+                entries.push_back({L"aim.player", L"Player aim", L"Aim", settings.aim_key,
+                    settings.aim_activation_mode, runtime.snapshot().player_aim_active, settings.aim_bind_show, true, true});
+                entries.push_back({L"aim.dino", L"Dino aim", L"Aim", settings.dino_aim_key,
+                    settings.dino_aim_activation_mode, runtime.snapshot().dino_aim_active,
+                    settings.dino_aim_bind_show, true, true});
+                for (const FeatureBinding& binding : settings.feature_bindings)
                 {
-                    const std::wstring id = entry.id;
-                    std::erase_if(settings.feature_bindings, [&](const FeatureBinding& binding) { return binding.id == id; });
-                    checkbox_binding_feature_id_.clear();
-                    break;
+                    if (binding.key == 0) continue;
+                    const FeatureDescriptor* descriptor = feature_descriptor(binding.id);
+                    if (descriptor == nullptr) continue;
+                    const auto state = std::find_if(feature_binding_runtime_.begin(), feature_binding_runtime_.end(),
+                        [&](const auto& item) { return item.id == binding.id; });
+                    entries.push_back({binding.id, descriptor->label, descriptor->category, binding.key, binding.mode,
+                        state != feature_binding_runtime_.end() && state->active,
+                        binding.show_in_list, false, true});
                 }
-                y += 50.0F;
-            }
-            if (page_count > 1)
-            {
-                if (button(L"Previous", {content_left, y, content_left + 110.0F, y + 32.0F}, true, input))
-                    hotkey_page_ = (hotkey_page_ + page_count - 1) % page_count;
-                if (button(L"Next", {content_left + 120.0F, y, content_left + 230.0F, y + 32.0F}, true, input))
-                    hotkey_page_ = (hotkey_page_ + 1) % page_count;
-                text(std::to_wstring(hotkey_page_ + 1) + L" / " + std::to_wstring(page_count),
-                    {content_left + 250.0F, y, frame.right - 32.0F, y + 32.0F}, text_secondary, 11.0F);
+                std::unordered_map<std::uint32_t, int> bind_usage;
+                for (const HotkeyEntry& entry : entries)
+                    if (entry.key != 0) ++bind_usage[entry.key];
+                const int conflict_keys = static_cast<int>(std::count_if(bind_usage.begin(), bind_usage.end(),
+                    [](const auto& item) { return item.second > 1; }));
+                if (conflict_keys > 0)
+                {
+                    text(L"BIND CONFLICTS: " + std::to_wstring(conflict_keys),
+                        {content_left + 2.0F, y, content_left + 220.0F, y + 28.0F}, warning, 11.0F);
+                    if (button(L"Open rebind panel", {content_left + 232.0F, y,
+                        content_left + 392.0F, y + 28.0F}, false, input)) settings_tab_page_ = 1;
+                    y += 36.0F;
+                }
+                else
+                {
+                    text(L"No bind conflicts", {content_left + 2.0F, y,
+                        frame.right - 32.0F, y + 24.0F}, success, 10.0F);
+                    y += 28.0F;
+                }
+                const int entries_per_page = std::clamp(
+                    static_cast<int>((frame.bottom - 88.0F - y) / 50.0F), 1, 6);
+                const int page_count = std::max(1, static_cast<int>((entries.size() + entries_per_page - 1) / entries_per_page));
+                hotkey_page_ = std::clamp(hotkey_page_, 0, page_count - 1);
+                const int begin = hotkey_page_ * entries_per_page;
+                const int end = std::min(static_cast<int>(entries.size()), begin + entries_per_page);
+                if (entries.empty())
+                {
+                    text(L"No feature binds yet. Right-click any checkbox or switch to add one.",
+                        {content_left + 2.0F, y, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
+                    y += 48.0F;
+                }
+                for (int index = begin; index < end; ++index)
+                {
+                    const HotkeyEntry& entry = entries[static_cast<std::size_t>(index)];
+                    const bool conflict = entry.key != 0 && bind_usage[entry.key] > 1;
+                    const Rect row{content_left, y, content_left + content_width_, y + 44.0F};
+                    fill(row, conflict ? Color{0.20F, 0.12F, 0.04F, 0.96F} :
+                        (entry.active ? Color{accent_dim.r, accent_dim.g, accent_dim.b, 0.72F} : surface));
+                    fill({row.left, row.top, row.left + 3.0F, row.bottom},
+                        conflict ? warning : (entry.active ? success : accent_dim));
+                    text(entry.label, {row.left + 12.0F, row.top + 3.0F, row.left + 245.0F, row.top + 24.0F},
+                        text_primary, 12.0F);
+                    text(entry.category + L" | " + key_name(entry.key) + L" | " +
+                        (entry.mode < 0 ? L"Action" : entry.mode == 0 ? L"Hold" :
+                            entry.mode == 1 ? L"Toggle" : L"Always"),
+                        {row.left + 12.0F, row.top + 22.0F, row.left + 350.0F, row.bottom - 2.0F},
+                        text_secondary, 10.0F);
+                    if (conflict)
+                        text(L"CONFLICT", {row.left + 350.0F, row.top + 4.0F,
+                            row.right - 164.0F, row.top + 22.0F}, warning, 9.0F, TextAlign::right);
+                    if (entry.visibility_control && button(entry.shown ? L"Eye" : L"Hidden",
+                        {row.right - 158.0F, row.top + 7.0F, row.right - 82.0F, row.bottom - 7.0F}, entry.shown, input))
+                    {
+                        if (entry.id == L"aim.player") settings.aim_bind_show = !settings.aim_bind_show;
+                        else if (entry.id == L"aim.dino") settings.dino_aim_bind_show = !settings.dino_aim_bind_show;
+                        else if (FeatureBinding* binding = settings.find_feature_binding(entry.id))
+                            binding->show_in_list = !binding->show_in_list;
+                    }
+                    else if (!entry.visibility_control)
+                        text(L"SYSTEM", {row.right - 158.0F, row.top + 7.0F,
+                            row.right - 82.0F, row.bottom - 7.0F}, text_secondary, 9.0F, TextAlign::center);
+                    if (!entry.special && button(L"Remove",
+                        {row.right - 76.0F, row.top + 7.0F, row.right - 8.0F, row.bottom - 7.0F}, false, input))
+                    {
+                        const std::wstring id = entry.id;
+                        std::erase_if(settings.feature_bindings, [&](const FeatureBinding& binding) { return binding.id == id; });
+                        checkbox_binding_feature_id_.clear();
+                        break;
+                    }
+                    y += 50.0F;
+                }
+                if (page_count > 1)
+                {
+                    if (button(L"Previous", {content_left, y, content_left + 110.0F, y + 32.0F}, true, input))
+                        hotkey_page_ = (hotkey_page_ + page_count - 1) % page_count;
+                    if (button(L"Next", {content_left + 120.0F, y, content_left + 230.0F, y + 32.0F}, true, input))
+                        hotkey_page_ = (hotkey_page_ + 1) % page_count;
+                    text(std::to_wstring(hotkey_page_ + 1) + L" / " + std::to_wstring(page_count),
+                        {content_left + 250.0F, y, frame.right - 32.0F, y + 32.0F}, text_secondary, 11.0F);
+                }
             }
         }
-        else if (active_tab_ == 7)
+        else if (active_tab_ == 5)
         {
             if (button(L"Types", {content_left, y, content_left + 162.0F, y + 34.0F},
                 alert_settings_page_ == 0, input)) alert_settings_page_ = 0;
             if (button(L"Tuning", {content_left + 170.0F, y, content_left + 332.0F, y + 34.0F},
                 alert_settings_page_ == 1, input)) alert_settings_page_ = 1;
+            if (button(L"Journal", {content_left + 340.0F, y, content_left + 502.0F, y + 34.0F},
+                alert_settings_page_ == 2, input)) alert_settings_page_ = 2;
             y += 48.0F;
-            checkbox(L"Enable alerts", settings.alerts_enabled, content_left, y, input);
+            if (alert_settings_page_ == 2)
+            {
+                const std::vector<JournalEntry>& journal = runtime.journal();
+                text(L"Contacts are kept for the retention window even after their alert card expires.",
+                    {content_left + 2.0F, y, frame.right - 32.0F, y + 20.0F}, text_secondary, 10.0F);
+                y += 24.0F;
+                // Seed from the saved value so the slider shows the real setting
+                // rather than its own default when the page is first opened.
+                if (!journal_retention_synced_)
+                {
+                    journal_retention_slider_ = static_cast<float>(settings.journal_retention_min);
+                    journal_retention_synced_ = true;
+                }
+                slider(L"Retention", journal_retention_slider_, 5.0F, 720.0F, content_left, y, input, L" min");
+                settings.journal_retention_min = static_cast<std::int32_t>(std::lround(journal_retention_slider_));
+                if (button(L"Clear journal", {content_left, y, content_left + 170.0F, y + 32.0F}, false, input))
+                    runtime.clear_journal();
+                text(std::to_wstring(journal.size()) + L" recorded",
+                    {content_left + 182.0F, y, frame.right - 32.0F, y + 32.0F}, text_secondary, 11.0F);
+                y += 40.0F;
+                if (journal.empty())
+                {
+                    text(L"Nothing recorded yet. Entries appear here as alerts fire.",
+                        {content_left + 2.0F, y, frame.right - 32.0F, y + 30.0F}, text_secondary, 12.0F);
+                }
+                // Newest first: coming back to the machine, the last thing that
+                // happened is the thing you want to read first.
+                for (std::size_t offset = 0; offset < journal.size(); ++offset)
+                {
+                    const JournalEntry& entry = journal[journal.size() - 1 - offset];
+                    const Rect row{content_left, y, frame.right - 30.0F, y + 34.0F};
+                    fill(row, offset % 2 == 0 ? surface : Color{0.045F, 0.032F, 0.062F, 0.98F});
+                    const auto stamp = std::chrono::system_clock::to_time_t(entry.time);
+                    std::tm local{};
+                    localtime_s(&local, &stamp);
+                    wchar_t clock_text[16]{};
+                    std::swprintf(clock_text, std::size(clock_text), L"%02d:%02d:%02d",
+                        local.tm_hour, local.tm_min, local.tm_sec);
+                    text(clock_text, {row.left + 8.0F, row.top + 8.0F, row.left + 74.0F, row.bottom},
+                        accent, 11.0F);
+                    std::wstring detail = entry.title;
+                    if (!entry.name.empty()) detail += L"  " + entry.name;
+                    if (!entry.tribe.empty()) detail += L" [" + entry.tribe + L"]";
+                    text(detail, {row.left + 80.0F, row.top + 8.0F, row.right - 150.0F, row.bottom},
+                        text_primary, 11.0F);
+                    std::wstring where = fixed(entry.distance_m, 0) + L" m";
+                    if (std::isfinite(entry.bearing_deg))
+                    {
+                        static constexpr const wchar_t* compass[]{
+                            L"N", L"NE", L"E", L"SE", L"S", L"SW", L"W", L"NW"};
+                        const auto sector = static_cast<std::size_t>(
+                            std::lround(entry.bearing_deg / 45.0F)) % 8;
+                        where += L"  " + std::wstring(compass[sector]);
+                    }
+                    text(where, {row.right - 144.0F, row.top + 8.0F, row.right - 10.0F, row.bottom},
+                        text_secondary, 11.0F, TextAlign::right);
+                    y += 38.0F;
+                }
+            }
+            else checkbox(L"Enable alerts", settings.alerts_enabled, content_left, y, input);
             if (alert_settings_page_ == 0)
             {
                 checkbox(L"New enemy player", settings.alert_new_player, content_left, y, input);
@@ -2628,7 +3127,7 @@ namespace kopt
                 checkbox(L"Enemy group (3+)", settings.alert_enemy_group, content_left, y, input);
                 checkbox(L"Notification sound", settings.alert_sound, content_left, y, input);
             }
-            else
+            else if (alert_settings_page_ == 1)
             {
                 slider(L"General radius", settings.alert_radius_m, 25.0F, 2000.0F,
                     content_left, y, input, L" m");
@@ -2644,8 +3143,13 @@ namespace kopt
                     runtime.clear_alert_history();
             }
         }
+
         else
         {
+            draw_diagnostics_body(runtime, content_left + 2.0F, y, frame.right - 32.0F);
+            y += 14.0F;
+            text(L"AIM LAB", {content_left + 2.0F, y, frame.right - 32.0F, y + 16.0F}, accent, 9.0F);
+            y += 20.0F;
             checkbox(L"Record Aim Lab trace (30 Hz / 20 seconds)", settings.aim_lab_recording,
                 content_left, y, input);
             const std::size_t trace_size = runtime.aim_trace_size();
@@ -2737,6 +3241,23 @@ namespace kopt
             }
         }
 
+        clear_clip();
+        menu_content_height_ = (y - content_origin) + 70.0F;
+        if (menu_content_height_ > menu_viewport_height_)
+        {
+            const float track_left = frame.right - 16.0F;
+            const Rect track{track_left, content_viewport.top + 4.0F,
+                track_left + 5.0F, content_viewport.bottom - 60.0F};
+            fill_rounded(track, 2.5F, {surface.r, surface.g, surface.b, 0.85F});
+            const float track_height = track.bottom - track.top;
+            const float thumb_height = std::max(36.0F,
+                track_height * (menu_viewport_height_ / menu_content_height_));
+            const float travel = std::max(1.0F, menu_content_height_ - menu_viewport_height_);
+            const float thumb_top = track.top +
+                (track_height - thumb_height) * std::clamp(menu_scroll_ / travel, 0.0F, 1.0F);
+            fill_rounded({track.left, thumb_top, track.right, thumb_top + thumb_height}, 2.5F, accent);
+        }
+
         fill({content_left, frame.bottom - 54.0F, frame.right - 28.0F, frame.bottom - 20.0F}, surface);
         text(runtime.status(), {content_left + 12.0F, frame.bottom - 49.0F, frame.right - 40.0F, frame.bottom - 24.0F},
             runtime.snapshot().local_valid ? success : warning, 12.0F);
@@ -2761,9 +3282,9 @@ namespace kopt
                     option.right - 8.0F, option.bottom}, selected ? text_primary : text_secondary, 12.0F);
             }
         }
-        const Rect grip{frame.right - 20.0F, frame.bottom - 20.0F, frame.right - 5.0F, frame.bottom - 5.0F};
-        line(grip.left + 4.0F, grip.bottom, grip.right, grip.top + 4.0F, accent_dim, 1.5F);
-        line(grip.left + 9.0F, grip.bottom, grip.right, grip.top + 9.0F, accent, 1.5F);
+        // The resize grip itself is drawn once, right after the frame fill above,
+        // with hover feedback tied to resize_region - this used to be a second,
+        // fainter, non-interactive pair of lines drawn here on top of it.
     }
 
     void Overlay::draw_command_palette(Settings& settings, InputState& input, const Rect& menu_frame)
@@ -2829,7 +3350,7 @@ namespace kopt
             fill({row.left, row.top, row.left + 3.0F, row.bottom}, value ? success : accent_dim);
             text(descriptor.label, {row.left + 12.0F, row.top + 2.0F,
                 row.right - 154.0F, row.top + 23.0F}, text_primary, 11.0F);
-            text(std::wstring(descriptor.category) + L" · " + descriptor.id,
+            text(std::wstring(descriptor.category) + L" | " + descriptor.id,
                 {row.left + 12.0F, row.top + 21.0F, row.right - 154.0F, row.bottom - 1.0F},
                 text_secondary, 9.0F);
             if (button(favorite ? L"FAV" : L"STAR",
@@ -3043,29 +3564,132 @@ namespace kopt
         }
     }
 
+    bool Overlay::take_diagnostics_line(const ArkRuntime& runtime, std::wstring& line)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (last_stats_log_.time_since_epoch().count() != 0 &&
+            now - last_stats_log_ < std::chrono::seconds(10)) return false;
+        last_stats_log_ = now;
+        const Snapshot& snapshot = runtime.snapshot();
+        const float frame_average = frame_timing_.average();
+        // Flat key=value so it stays greppable and diffable across a session.
+        line = L"stats"
+            L" fps=" + fixed(frame_average > 0.001F ? 1000.0F / frame_average : 0.0F, 1) +
+            L" frame_ms=" + fixed(frame_average, 2) +
+            L" esp_ms=" + fixed(esp_timing_.average(), 3) +
+            L" esp_peak_ms=" + fixed(esp_timing_.peak(), 3) +
+            L" menu_ms=" + fixed(menu_timing_.average(), 3) +
+            L" build_ms=" + fixed(last_overlay_build_ms_, 3) +
+            L" flush_ms=" + fixed(last_overlay_flush_ms_, 3) +
+            L" verts=" + std::to_wstring(last_vertex_count_) +
+            L" runtime_ms=" + fixed(snapshot.runtime_update_ms, 3) +
+            L" discovery_ms=" + fixed(snapshot.discovery_ms, 3) +
+            L" refresh_ms=" + fixed(snapshot.refresh_ms, 3) +
+            L" oldest_s=" + fixed(snapshot.oldest_actor_age_s, 2) +
+            L" tracked=" + std::to_wstring(snapshot.actors.size()) +
+            L" drawn=" + std::to_wstring(esp_stats_.drawn) +
+            L" players=" + std::to_wstring(esp_stats_.players) +
+            L" dinos=" + std::to_wstring(esp_stats_.dinos) +
+            L" structures=" + std::to_wstring(esp_stats_.structures) +
+            L" turrets=" + std::to_wstring(esp_stats_.turrets) +
+            L" grouped=" + std::to_wstring(esp_stats_.grouped_away) +
+            L" offscreen=" + std::to_wstring(esp_stats_.offscreen) +
+            L" labels=" + std::to_wstring(esp_stats_.labels);
+        return true;
+    }
+
+    void Overlay::draw_diagnostics_body(const ArkRuntime& runtime, const float x, float& y, const float right)
+    {
+        const Snapshot& snapshot = runtime.snapshot();
+        const float value_x = x + 168.0F;
+        const auto section = [&](const wchar_t* title) {
+            y += 6.0F;
+            text(title, {x, y, right, y + 16.0F}, accent, 9.0F);
+            y += 18.0F;
+        };
+        // Two aligned columns: the eye can scan a value column, it cannot scan
+        // four different numbers run together on one line.
+        const auto row = [&](const wchar_t* name, const std::wstring& value, const Color& value_color) {
+            text(name, {x, y, value_x - 6.0F, y + 18.0F}, text_secondary, 11.0F);
+            text(value, {value_x, y, right, y + 18.0F}, value_color, 11.0F);
+            y += 18.0F;
+        };
+        // avg / worst-in-window, because a single frame's number is unreadable
+        // noise and the spike is the part that actually matters.
+        const auto timing = [&](const wchar_t* name, const FrameTiming& source, const float warn_ms) {
+            const float peak = source.peak();
+            row(name, fixed(source.average(), 2) + L" ms   peak " + fixed(peak, 2) + L" ms",
+                peak > warn_ms ? warning : text_primary);
+        };
+
+        section(L"FRAME");
+        const float frame_average = frame_timing_.average();
+        row(L"Present interval", fixed(frame_average, 2) + L" ms   " +
+            fixed(frame_average > 0.001F ? 1000.0F / frame_average : 0.0F, 0) + L" fps", text_primary);
+        timing(L"ESP draw", esp_timing_, 2.0F);
+        timing(L"Menu draw", menu_timing_, 3.0F);
+        row(L"Overlay build", fixed(last_overlay_build_ms_, 2) + L" ms", text_primary);
+        row(L"Overlay flush", fixed(last_overlay_flush_ms_, 2) + L" ms", text_primary);
+        row(L"Vertices", std::to_wstring(last_vertex_count_), text_primary);
+
+        section(L"RUNTIME");
+        row(L"Update", fixed(snapshot.runtime_update_ms, 2) + L" ms",
+            snapshot.runtime_update_ms > 8.0F ? warning : text_primary);
+        row(L"Discovery", fixed(snapshot.discovery_ms, 2) + L" ms", text_primary);
+        row(L"Refresh", fixed(snapshot.refresh_ms, 2) + L" ms", text_primary);
+        row(L"Oldest actor", fixed(snapshot.oldest_actor_age_s, 2) + L" s",
+            snapshot.oldest_actor_age_s > 5.0F ? warning : text_primary);
+        row(L"Captures", std::to_wstring(snapshot.captures), text_secondary);
+
+        section(L"ESP");
+        row(L"Tracked / drawn", std::to_wstring(snapshot.actors.size()) + L"  ->  " +
+            std::to_wstring(esp_stats_.drawn), text_primary);
+        row(L"Players / dinos", std::to_wstring(esp_stats_.players) + L"  /  " +
+            std::to_wstring(esp_stats_.dinos), text_primary);
+        row(L"Structures / turrets", std::to_wstring(esp_stats_.structures) + L"  /  " +
+            std::to_wstring(esp_stats_.turrets), text_primary);
+        row(L"Hidden by grouping", std::to_wstring(esp_stats_.grouped_away), text_secondary);
+        row(L"Off-screen", std::to_wstring(esp_stats_.offscreen), text_secondary);
+        row(L"Labels drawn", std::to_wstring(esp_stats_.labels), text_primary);
+
+        section(L"AIM");
+        row(L"State", snapshot.aim_active ? L"ACTIVE" : L"idle",
+            snapshot.aim_active ? warning : text_secondary);
+        row(L"Armed / target", std::wstring(snapshot.aim_armed ? L"yes" : L"no") + L"  /  " +
+            (snapshot.aim_target != 0 ? L"yes" : L"no"), text_secondary);
+    }
+
+    // The in-world panel stays a small always-visible summary; the full readout
+    // lives in the Diagnostics tab, where there is room and a scrollbar. The
+    // previous version drew the whole table into a fixed 320px box and simply
+    // ran off the bottom of its own background.
     void Overlay::draw_debug(const ArkRuntime& runtime)
     {
         const Snapshot& snapshot = runtime.snapshot();
-        const Rect rect{width_ - 350.0F, 18.0F, width_ - 18.0F, 142.0F};
-        fill(rect, {0.02F, 0.03F, 0.05F, 0.82F});
-        text(L"KOPT INTERNAL", {rect.left + 12.0F, rect.top + 8.0F, rect.right - 12.0F, rect.top + 30.0F}, accent, 12.0F);
-        text(runtime.status(), {rect.left + 12.0F, rect.top + 31.0F, rect.right - 12.0F, rect.top + 52.0F}, text_primary, 12.0F);
-        text(L"Capture #" + std::to_wstring(snapshot.captures) + L"  |  Home: menu",
-            {rect.left + 12.0F, rect.top + 52.0F, rect.right - 12.0F, rect.top + 72.0F}, text_secondary, 11.0F);
-        text(L"Aim " + std::wstring(snapshot.aim_active ? L"ACTIVE" : L"idle") +
-            L"  armed=" + (snapshot.aim_armed ? L"yes" : L"no") +
-            L"  target=" + (snapshot.aim_target != 0 ? L"yes" : L"no"),
-            {rect.left + 12.0F, rect.top + 72.0F, rect.right - 12.0F, rect.top + 96.0F},
-            snapshot.aim_active ? warning : text_secondary, 11.0F);
-        text(L"Runtime " + fixed(snapshot.runtime_update_ms, 2) + L" ms  |  UI " +
-            fixed(last_overlay_build_ms_, 2) + L" + " + fixed(last_overlay_flush_ms_, 2) +
-            L" ms  |  " + std::to_wstring(last_vertex_count_) + L" vertices",
-            {rect.left + 12.0F, rect.top + 94.0F, rect.right - 12.0F, rect.top + 116.0F},
-            snapshot.runtime_update_ms > 8.0F ? warning : text_secondary, 10.0F);
-        text(L"Discovery " + fixed(snapshot.discovery_ms, 2) + L" ms  |  Refresh " +
-            fixed(snapshot.refresh_ms, 2) + L" ms  |  Oldest " + fixed(snapshot.oldest_actor_age_s, 2) + L" s",
-            {rect.left + 12.0F, rect.top + 114.0F, rect.right - 12.0F, rect.bottom - 4.0F},
-            text_secondary, 10.0F);
+        const float panel_width = 300.0F;
+        const float panel_height = 108.0F;
+        const Rect rect{width_ - panel_width - 18.0F, 18.0F, width_ - 18.0F, 18.0F + panel_height};
+        fill_rounded(rect, 8.0F, {0.02F, 0.03F, 0.05F, 0.88F});
+        stroke_rounded(rect, 8.0F, accent_dim, 1.0F);
+        const float label_x = rect.left + 14.0F;
+        const float value_x = rect.left + 150.0F;
+        float row_y = rect.top + 9.0F;
+        const auto row = [&](const wchar_t* name, const std::wstring& value, const Color& value_color) {
+            text(name, {label_x, row_y, value_x - 6.0F, row_y + 18.0F}, text_secondary, 11.0F);
+            text(value, {value_x, row_y, rect.right - 12.0F, row_y + 18.0F}, value_color, 11.0F);
+            row_y += 18.0F;
+        };
+        text(L"KOPT", {label_x, row_y, rect.right - 12.0F, row_y + 18.0F}, accent, 11.0F);
+        row_y += 20.0F;
+        const float frame_average = frame_timing_.average();
+        row(L"Frame", fixed(frame_average, 2) + L" ms   " +
+            fixed(frame_average > 0.001F ? 1000.0F / frame_average : 0.0F, 0) + L" fps", text_primary);
+        row(L"ESP draw", fixed(esp_timing_.average(), 2) + L" ms   peak " +
+            fixed(esp_timing_.peak(), 2), esp_timing_.peak() > 2.0F ? warning : text_primary);
+        row(L"Tracked / drawn", std::to_wstring(snapshot.actors.size()) + L"  ->  " +
+            std::to_wstring(esp_stats_.drawn), text_primary);
+        row(L"Runtime", fixed(snapshot.runtime_update_ms, 2) + L" ms",
+            snapshot.runtime_update_ms > 8.0F ? warning : text_primary);
     }
 
     bool Overlay::flush()
@@ -3193,11 +3817,33 @@ namespace kopt
     void Overlay::add_quad(const Rect& rect, const float u0, const float v0,
         const float u1, const float v1, const Color& color)
     {
+        Rect quad = rect;
+        float quad_u0 = u0, quad_v0 = v0, quad_u1 = u1, quad_v1 = v1;
+        if (clip_active_)
+        {
+            // Everything renders in one Draw call, so there is no GPU scissor to
+            // lean on for scrolling panels. Trim the quad to the clip rect here
+            // and lerp the UVs with it, which clips glyph quads exactly the same
+            // way as flat fills instead of popping whole characters.
+            const float width = quad.right - quad.left;
+            const float height = quad.bottom - quad.top;
+            if (width <= 0.0F || height <= 0.0F) return;
+            const Rect clipped{std::max(quad.left, clip_rect_.left), std::max(quad.top, clip_rect_.top),
+                std::min(quad.right, clip_rect_.right), std::min(quad.bottom, clip_rect_.bottom)};
+            if (clipped.right <= clipped.left || clipped.bottom <= clipped.top) return;
+            const float u_span = quad_u1 - quad_u0;
+            const float v_span = quad_v1 - quad_v0;
+            quad_u1 = quad_u0 + u_span * ((clipped.right - quad.left) / width);
+            quad_u0 = quad_u0 + u_span * ((clipped.left - quad.left) / width);
+            quad_v1 = quad_v0 + v_span * ((clipped.bottom - quad.top) / height);
+            quad_v0 = quad_v0 + v_span * ((clipped.top - quad.top) / height);
+            quad = clipped;
+        }
         const std::uint32_t packed = pack(color);
         vertices_.insert(vertices_.end(), {
-            {rect.left, rect.top, u0, v0, packed}, {rect.right, rect.top, u1, v0, packed},
-            {rect.right, rect.bottom, u1, v1, packed}, {rect.left, rect.top, u0, v0, packed},
-            {rect.right, rect.bottom, u1, v1, packed}, {rect.left, rect.bottom, u0, v1, packed}
+            {quad.left, quad.top, quad_u0, quad_v0, packed}, {quad.right, quad.top, quad_u1, quad_v0, packed},
+            {quad.right, quad.bottom, quad_u1, quad_v1, packed}, {quad.left, quad.top, quad_u0, quad_v0, packed},
+            {quad.right, quad.bottom, quad_u1, quad_v1, packed}, {quad.left, quad.bottom, quad_u0, quad_v1, packed}
         });
     }
 
@@ -3208,6 +3854,27 @@ namespace kopt
             static_cast<float>(atlas_x + pixel_width) / atlas_width,
             static_cast<float>(atlas_y + pixel_height) / atlas_height,
             {1.0F, 1.0F, 1.0F, 1.0F});
+    }
+
+    void Overlay::set_clip(const Rect& rect)
+    {
+        clip_rect_ = rect;
+        clip_active_ = true;
+    }
+
+    void Overlay::clear_clip()
+    {
+        clip_active_ = false;
+    }
+
+    // Direct-vertex shapes (circles, rounded-corner fans) are not trimmed
+    // geometrically the way add_quad is, so they are simply dropped when they
+    // would cross the clip edge rather than allowed to bleed past it.
+    bool Overlay::clip_allows(const Rect& bounds) const
+    {
+        if (!clip_active_) return true;
+        return bounds.left >= clip_rect_.left && bounds.right <= clip_rect_.right &&
+            bounds.top >= clip_rect_.top && bounds.bottom <= clip_rect_.bottom;
     }
 
     void Overlay::fill(const Rect& rect, const Color& color)
@@ -3225,6 +3892,97 @@ namespace kopt
         fill({rect.right - width, rect.top + width, rect.right, rect.bottom - width}, color);
     }
 
+    void Overlay::fill_circle(const float cx, const float cy, const float radius, const Color& color)
+    {
+        if (!clip_allows({cx - radius, cy - radius, cx + radius, cy + radius})) return;
+        const std::uint32_t packed = pack(color);
+        const float u = 0.5F / atlas_width;
+        const float v = 0.5F / atlas_height;
+        constexpr int segments = 16;
+        constexpr float tau = 6.28318531F;
+        float previous_x = cx + radius;
+        float previous_y = cy;
+        for (int i = 1; i <= segments; ++i)
+        {
+            const float angle = (static_cast<float>(i) / segments) * tau;
+            const float x = cx + std::cos(angle) * radius;
+            const float y = cy + std::sin(angle) * radius;
+            vertices_.insert(vertices_.end(), {
+                {cx, cy, u, v, packed}, {previous_x, previous_y, u, v, packed}, {x, y, u, v, packed}});
+            previous_x = x;
+            previous_y = y;
+        }
+    }
+
+    // A rounded rect = a central cross of three sharp-edged fills plus four
+    // quarter-circle corner fans, so the plain rect fast path (fill()) stays
+    // untouched and every caller that wants softer corners just swaps calls.
+    void Overlay::fill_rounded(const Rect& rect, const float radius, const Color& color)
+    {
+        const float r = std::clamp(radius, 0.0F,
+            std::min(rect.right - rect.left, rect.bottom - rect.top) * 0.5F);
+        if (r <= 0.5F) { fill(rect, color); return; }
+        fill({rect.left, rect.top + r, rect.right, rect.bottom - r}, color);
+        fill({rect.left + r, rect.top, rect.right - r, rect.top + r}, color);
+        fill({rect.left + r, rect.bottom - r, rect.right - r, rect.bottom}, color);
+        const std::uint32_t packed = pack(color);
+        const float u = 0.5F / atlas_width;
+        const float v = 0.5F / atlas_height;
+        constexpr int segments = 8;
+        constexpr float half_pi = 1.57079633F;
+        constexpr float pi = 3.14159265F;
+        const auto corner = [&](const float cx, const float cy, const float start_angle) {
+            if (!clip_allows({cx - r, cy - r, cx + r, cy + r})) return;
+            float previous_x = cx + std::cos(start_angle) * r;
+            float previous_y = cy + std::sin(start_angle) * r;
+            for (int i = 1; i <= segments; ++i)
+            {
+                const float angle = start_angle + (static_cast<float>(i) / segments) * half_pi;
+                const float x = cx + std::cos(angle) * r;
+                const float y = cy + std::sin(angle) * r;
+                vertices_.insert(vertices_.end(), {
+                    {cx, cy, u, v, packed}, {previous_x, previous_y, u, v, packed}, {x, y, u, v, packed}});
+                previous_x = x;
+                previous_y = y;
+            }
+        };
+        corner(rect.left + r, rect.top + r, pi);
+        corner(rect.right - r, rect.top + r, -half_pi);
+        corner(rect.right - r, rect.bottom - r, 0.0F);
+        corner(rect.left + r, rect.bottom - r, half_pi);
+    }
+
+    void Overlay::stroke_rounded(const Rect& rect, const float radius, const Color& color, const float width)
+    {
+        const float r = std::clamp(radius, 0.0F,
+            std::min(rect.right - rect.left, rect.bottom - rect.top) * 0.5F);
+        if (r <= 0.5F) { stroke(rect, color, width); return; }
+        line(rect.left + r, rect.top, rect.right - r, rect.top, color, width);
+        line(rect.left + r, rect.bottom, rect.right - r, rect.bottom, color, width);
+        line(rect.left, rect.top + r, rect.left, rect.bottom - r, color, width);
+        line(rect.right, rect.top + r, rect.right, rect.bottom - r, color, width);
+        constexpr int segments = 8;
+        constexpr float half_pi = 1.57079633F;
+        constexpr float pi = 3.14159265F;
+        const auto arc = [&](const float cx, const float cy, const float start_angle) {
+            float previous_x = cx + std::cos(start_angle) * r;
+            float previous_y = cy + std::sin(start_angle) * r;
+            for (int i = 1; i <= segments; ++i)
+            {
+                const float angle = start_angle + (static_cast<float>(i) / segments) * half_pi;
+                const float x = cx + std::cos(angle) * r;
+                const float y = cy + std::sin(angle) * r;
+                line(previous_x, previous_y, x, y, color, width);
+                previous_x = x;
+                previous_y = y;
+            }
+        };
+        arc(rect.left + r, rect.top + r, pi);
+        arc(rect.right - r, rect.top + r, -half_pi);
+        arc(rect.right - r, rect.bottom - r, 0.0F);
+        arc(rect.left + r, rect.bottom - r, half_pi);
+    }
+
     void Overlay::line(const float x1, const float y1, const float x2, const float y2,
         const Color& color, const float width)
     {
@@ -3232,6 +3990,8 @@ namespace kopt
         const float dy = y2 - y1;
         const float length = std::sqrt(dx * dx + dy * dy);
         if (length < 0.001F) return;
+        if (!clip_allows({std::min(x1, x2) - width, std::min(y1, y2) - width,
+            std::max(x1, x2) + width, std::max(y1, y2) + width})) return;
         const float nx = -dy / length * width * 0.5F;
         const float ny = dx / length * width * 0.5F;
         const std::uint32_t packed = pack(color);
@@ -3242,6 +4002,90 @@ namespace kopt
             {x2 - nx, y2 - ny, u, v, packed}, {x1 + nx, y1 + ny, u, v, packed},
             {x2 - nx, y2 - ny, u, v, packed}, {x1 - nx, y1 - ny, u, v, packed}
         });
+    }
+
+    int Overlay::color_picker_id(const std::wstring_view feature_id, const std::wstring_view color_label)
+    {
+        const std::size_t hashed = std::hash<std::wstring_view>{}(feature_id) ^
+            (std::hash<std::wstring_view>{}(color_label) << 1);
+        // Keep it positive and clear of -1, which means "nothing open".
+        return static_cast<int>(hashed & 0x7FFFFFFFU) | 1;
+    }
+
+    // Preset swatches plus RGB/opacity sliders. Shared by the standalone color
+    // rows and by the right-click entry popup so both pick colors the same way.
+    bool Overlay::draw_palette(Color& value, const float x, float& y, InputState& input)
+    {
+        static constexpr Color palette[]{
+            {0.95F, 0.95F, 0.97F, 1.0F}, {0.65F, 0.66F, 0.72F, 1.0F},
+            {1.00F, 0.31F, 0.38F, 1.0F}, {0.92F, 0.22F, 0.34F, 1.0F},
+            {1.00F, 0.48F, 0.12F, 1.0F}, {1.00F, 0.72F, 0.30F, 1.0F},
+            {1.00F, 0.90F, 0.30F, 1.0F}, {0.82F, 0.94F, 0.30F, 1.0F},
+            {0.29F, 0.90F, 0.62F, 1.0F}, {0.20F, 0.78F, 0.48F, 1.0F},
+            {0.18F, 0.88F, 1.00F, 1.0F}, {0.29F, 0.68F, 1.00F, 1.0F},
+            {0.35F, 0.45F, 0.95F, 1.0F}, {0.55F, 0.36F, 0.97F, 1.0F},
+            {0.75F, 0.35F, 0.95F, 1.0F}, {0.98F, 0.45F, 0.78F, 1.0F}};
+        bool changed{};
+        constexpr int columns = 8;
+        const float cell = 26.0F;
+        for (int index = 0; index < static_cast<int>(std::size(palette)); ++index)
+        {
+            const float cell_x = x + 2.0F + static_cast<float>(index % columns) * (cell + 4.0F);
+            const float cell_y = y + static_cast<float>(index / columns) * (cell + 4.0F);
+            const Rect chip{cell_x, cell_y, cell_x + cell, cell_y + cell};
+            fill_rounded(chip, 5.0F, {palette[index].r, palette[index].g, palette[index].b, 1.0F});
+            if (contains(chip, input.frame_mouse_x, input.frame_mouse_y))
+                stroke_rounded(chip, 5.0F, text_primary, 1.6F);
+            if (consume_click(chip, input))
+            {
+                const float keep_alpha = value.a;
+                value = palette[index];
+                value.a = keep_alpha;
+                changed = true;
+            }
+        }
+        y += static_cast<float>((std::size(palette) + columns - 1) / columns) * (cell + 4.0F) + 6.0F;
+        changed |= slider(L"Red", value.r, 0.0F, 1.0F, x, y, input);
+        changed |= slider(L"Green", value.g, 0.0F, 1.0F, x, y, input);
+        changed |= slider(L"Blue", value.b, 0.0F, 1.0F, x, y, input);
+        changed |= slider(L"Opacity", value.a, 0.10F, 1.0F, x, y, input);
+        return changed;
+    }
+
+    // One labelled row with a swatch that expands into the shared palette. Used
+    // for the few colors that have no feature toggle of their own to hang off.
+    bool Overlay::color_picker(const std::wstring& label, Color& value, const int id,
+        const float x, float& y, InputState& input)
+    {
+        const bool open = open_color_picker_ == id;
+        const Rect row{x, y, x + content_width_, y + 30.0F};
+        if (contains(row, input.frame_mouse_x, input.frame_mouse_y))
+            fill_rounded(row, 6.0F, {surface_hover.r, surface_hover.g, surface_hover.b, 0.42F});
+        text(label, {x + 2.0F, y, x + content_width_ - 96.0F, y + 30.0F}, text_primary, 13.0F);
+        const Rect swatch{x + content_width_ - 86.0F, y + 4.0F, x + content_width_ - 10.0F, y + 26.0F};
+        fill_rounded(swatch, 5.0F, {value.r, value.g, value.b, 1.0F});
+        stroke_rounded(swatch, 5.0F, open ? accent : text_secondary, 1.2F);
+        if (consume_click(swatch, input)) open_color_picker_ = open ? -1 : id;
+        y += 34.0F;
+        return open ? draw_palette(value, x, y, input) : false;
+    }
+
+    float Overlay::measure_text(const std::wstring& value, const float size) const
+    {
+        const float scale = size / 22.0F;
+        float widest{};
+        float current{};
+        for (const wchar_t character : value)
+        {
+            if (character == L'\n')
+            {
+                widest = std::max(widest, current);
+                current = 0.0F;
+                continue;
+            }
+            current += glyph_advances_[glyph_index(character)] * scale;
+        }
+        return std::max(widest, current);
     }
 
     void Overlay::text(const std::wstring& value, const Rect& rect, const Color& color,
@@ -3270,8 +4114,7 @@ namespace kopt
             return;
         }
         const float scale = size / 22.0F;
-        float text_width{};
-        for (const wchar_t character : value) text_width += glyph_advances_[glyph_index(character)] * scale;
+        const float text_width = measure_text(value, size);
         float x = rect.left;
         if (alignment == TextAlign::center) x = (rect.left + rect.right - text_width) * 0.5F;
         else if (alignment == TextAlign::right) x = rect.right - text_width;
@@ -3302,8 +4145,9 @@ namespace kopt
         const int x = input.frame_mouse_x;
         const int y = input.frame_mouse_y;
         const bool hovered = contains(rect, x, y);
-        fill(rect, active ? accent_dim : (hovered ? surface_hover : surface));
-        if (active) fill({rect.left, rect.top, rect.left + 3.0F, rect.bottom}, accent);
+        const float radius = std::min(8.0F, (rect.bottom - rect.top) * 0.5F);
+        fill_rounded(rect, radius, active ? accent_dim : (hovered ? surface_hover : surface));
+        if (active) stroke_rounded(rect, radius, accent, 1.4F);
         text(label, {rect.left + 14.0F, rect.top, rect.right - 10.0F, rect.bottom},
             active ? text_primary : text_secondary, 13.0F);
         return consume_click(rect, input);
@@ -3313,13 +4157,15 @@ namespace kopt
     {
         const Rect row{x, y, x + content_width_, y + 34.0F};
         const bool hovered = contains(row, input.frame_mouse_x, input.frame_mouse_y);
-        if (hovered) fill(row, {surface_hover.r, surface_hover.g, surface_hover.b, 0.45F});
+        if (hovered) fill_rounded(row, 8.0F, {surface_hover.r, surface_hover.g, surface_hover.b, 0.45F});
         text(label, {x + 2.0F, y, x + content_width_ - 110.0F, y + 34.0F}, text_primary, 13.0F);
         const Rect switch_rect{x + content_width_ - 60.0F, y + 7.0F,
             x + content_width_ - 14.0F, y + 27.0F};
-        fill(switch_rect, value ? accent_dim : surface);
-        const float knob = value ? switch_rect.right - 16.0F : switch_rect.left + 4.0F;
-        fill({knob, switch_rect.top + 4.0F, knob + 12.0F, switch_rect.bottom - 4.0F}, value ? accent : text_secondary);
+        const float switch_radius = (switch_rect.bottom - switch_rect.top) * 0.5F;
+        fill_rounded(switch_rect, switch_radius, value ? accent_dim : surface);
+        const float knob_cx = value ? switch_rect.right - switch_radius : switch_rect.left + switch_radius;
+        const float knob_cy = (switch_rect.top + switch_rect.bottom) * 0.5F;
+        fill_circle(knob_cx, knob_cy, switch_radius - 3.0F, value ? accent : text_secondary);
         bool changed{};
         if (consume_click(row, input))
         {
@@ -3335,11 +4181,11 @@ namespace kopt
     {
         const Rect row{x, y, x + content_width_, y + 28.0F};
         const bool hovered = contains(row, input.frame_mouse_x, input.frame_mouse_y);
-        if (hovered) fill(row, {surface_hover.r, surface_hover.g, surface_hover.b, 0.42F});
+        if (hovered) fill_rounded(row, 6.0F, {surface_hover.r, surface_hover.g, surface_hover.b, 0.42F});
         const Rect box{x + 2.0F, y + 5.0F, x + 20.0F, y + 23.0F};
-        fill(box, value ? accent_dim : surface);
-        stroke(box, value ? accent : text_secondary);
-        if (value) fill({box.left + 5.0F, box.top + 5.0F, box.right - 5.0F, box.bottom - 5.0F}, accent);
+        fill_rounded(box, 4.0F, value ? accent_dim : surface);
+        stroke_rounded(box, 4.0F, value ? accent : text_secondary, 1.0F);
+        if (value) fill_rounded({box.left + 5.0F, box.top + 5.0F, box.right - 5.0F, box.bottom - 5.0F}, 2.0F, accent);
         text(label, {x + 31.0F, y, x + content_width_ - 10.0F, y + 28.0F}, text_primary, 13.0F);
         const bool changed = consume_click(row, input);
         if (changed) value = !value;
@@ -3365,7 +4211,7 @@ namespace kopt
             dino_aim ? settings_context_->dino_aim_bind_show : binding != nullptr && binding->show_in_list;
         static constexpr std::array<const wchar_t*, 3> mode_names{L"Hold", L"Toggle", L"Always"};
         if (key != 0)
-            text(key_name(key) + L" · " + mode_names[static_cast<std::size_t>(std::clamp(mode, 0, 2))],
+            text(key_name(key) + L" | " + mode_names[static_cast<std::size_t>(std::clamp(mode, 0, 2))],
                 {row.left + 220.0F, row.top, row.right - 12.0F, row.bottom},
                 checkbox_binding_feature_id_ == descriptor->id ? accent : text_secondary,
                 11.0F, TextAlign::right);
@@ -3402,33 +4248,71 @@ namespace kopt
         show = player_aim ? settings_context_->aim_bind_show : dino_aim ? settings_context_->dino_aim_bind_show :
             binding != nullptr && binding->show_in_list;
 
-        const float card_height = 126.0F;
+        // Everything that belongs to this entry lives in this one popup - bind,
+        // colors, entry-specific options - so the list itself stays one row per
+        // feature instead of growing a stack of inline color/option rows.
+        std::vector<std::pair<const wchar_t*, Color*>> entry_colors;
+        const std::wstring_view id_view{descriptor->id};
+        if (id_view == L"esp.players")
+        {
+            entry_colors.emplace_back(L"Enemy", &settings_context_->enemy_color);
+            entry_colors.emplace_back(L"Ally", &settings_context_->ally_color);
+            entry_colors.emplace_back(L"Own", &settings_context_->own_color);
+        }
+        else if (id_view == L"esp.wild_dinos") entry_colors.emplace_back(L"Wild", &settings_context_->wild_color);
+        else if (id_view == L"esp.structures") entry_colors.emplace_back(L"Structure", &settings_context_->structure_color);
+        else if (id_view == L"esp.turrets") entry_colors.emplace_back(L"Turret", &settings_context_->turret_color);
+        else if (id_view == L"esp.drops") entry_colors.emplace_back(L"Drop", &settings_context_->drop_color);
+        else if (id_view == L"esp.death_caches") entry_colors.emplace_back(L"Cache", &settings_context_->death_cache_color);
+        else if (id_view == L"esp.explorer_notes") entry_colors.emplace_back(L"Note", &settings_context_->explorer_note_color);
+        else if (id_view == L"esp.horde")
+        {
+            entry_colors.emplace_back(L"OSD", &settings_context_->horde_crate_color);
+            entry_colors.emplace_back(L"Element", &settings_context_->element_node_color);
+        }
+        else if (id_view == L"chams.local") entry_colors.emplace_back(L"Chams", &settings_context_->local_chams_color);
+
+        const bool turret_entry = id_view == L"esp.turrets";
+        // Matches the top-down flow below: 8 pad + 22 header + 34 bind + 32 modes
+        // + 34 actions + 8 pad, then whatever the optional sections add.
+        const float extras_height = (entry_colors.empty() ? 0.0F : 46.0F) + (turret_entry ? 32.0F : 0.0F);
+        const float card_height = 138.0F + extras_height;
         const Rect card{x + 14.0F, y, x + content_width_ - 8.0F, y + card_height};
         fill(card, {surface.r, surface.g, surface.b, 0.98F});
         stroke(card, accent_dim);
-        text(std::wstring(L"BIND · ") + descriptor->category,
-            {card.left + 12.0F, card.top + 5.0F, card.right - 12.0F, card.top + 26.0F}, accent, 10.0F);
+        // Everything flows top-down from one cursor. The old layout pinned the
+        // bottom row to card.bottom, so the moment the card grew for colors that
+        // row stretched down across them.
+        float card_y = card.top + 8.0F;
+        const float card_inner_left = card.left + 12.0F;
+        const float card_inner_right = card.right - 12.0F;
+        text(std::wstring(L"BIND / ") + descriptor->category,
+            {card_inner_left, card_y, card_inner_right, card_y + 18.0F}, accent, 10.0F);
+        card_y += 22.0F;
         const BindingTarget target = player_aim ? BindingTarget::aim :
             dino_aim ? BindingTarget::dino_aim : BindingTarget::feature;
         const bool waiting = binding_target_ == target &&
             (target != BindingTarget::feature || binding_feature_id_ == descriptor->id);
-        const Rect bind_rect{card.left + 12.0F, card.top + 28.0F, card.right - 12.0F, card.top + 60.0F};
         if (button(waiting ? L"Press any key or mouse button..." :
-            key == 0 ? L"Add keybind" : key_name(key), bind_rect, waiting, input))
+            key == 0 ? L"Add keybind" : key_name(key),
+            {card_inner_left, card_y, card_inner_right, card_y + 30.0F}, waiting, input))
         {
             binding_target_ = target;
             binding_feature_id_ = descriptor->id;
             input.captured_key.store(0, std::memory_order_relaxed);
             input.binding_capture.store(true, std::memory_order_release);
         }
+        card_y += 34.0F;
 
         const int mode_count = player_aim || dino_aim ? 3 : 2;
-        const float mode_width = (card.right - card.left - 30.0F) / static_cast<float>(mode_count);
+        const float mode_width =
+            (card_inner_right - card_inner_left - static_cast<float>(mode_count - 1) * 4.0F) /
+            static_cast<float>(mode_count);
         for (int index = 0; index < mode_count; ++index)
         {
-            const float left = card.left + 12.0F + static_cast<float>(index) * (mode_width + 3.0F);
+            const float left = card_inner_left + static_cast<float>(index) * (mode_width + 4.0F);
             if (button(mode_names[static_cast<std::size_t>(index)],
-                {left, card.top + 66.0F, left + mode_width, card.top + 96.0F}, mode == index, input))
+                {left, card_y, left + mode_width, card_y + 28.0F}, mode == index, input))
             {
                 mode = index;
                 if (player_aim) settings_context_->aim_activation_mode = mode;
@@ -3436,23 +4320,65 @@ namespace kopt
                 else if (binding != nullptr) binding->mode = mode;
             }
         }
-        const Rect list_button{card.left + 12.0F, card.top + 101.0F, card.left + 172.0F, card.bottom - 5.0F};
-        if (button(show ? L"Eye · shown" : L"Eye · hidden", list_button, show, input))
+        card_y += 32.0F;
+
+        const bool removable = !player_aim && !dino_aim && binding != nullptr;
+        const float action_width = removable ?
+            (card_inner_right - card_inner_left - 4.0F) * 0.5F : card_inner_right - card_inner_left;
+        if (button(show ? L"Shown in list" : L"Hidden from list",
+            {card_inner_left, card_y, card_inner_left + action_width, card_y + 28.0F}, show, input))
         {
             show = !show;
             if (player_aim) settings_context_->aim_bind_show = show;
             else if (dino_aim) settings_context_->dino_aim_bind_show = show;
             else if (binding != nullptr) binding->show_in_list = show;
         }
-        if (!player_aim && !dino_aim && binding != nullptr &&
-            button(L"Remove bind", {card.right - 150.0F, card.top + 101.0F,
-                card.right - 12.0F, card.bottom - 5.0F}, false, input))
+        if (removable && button(L"Remove bind",
+            {card_inner_right - action_width, card_y, card_inner_right, card_y + 28.0F}, false, input))
         {
             const std::wstring id = descriptor->id;
             std::erase_if(settings_context_->feature_bindings, [&](const FeatureBinding& item) { return item.id == id; });
             checkbox_binding_feature_id_.clear();
         }
+        card_y += 34.0F;
+
+        if (!entry_colors.empty())
+        {
+            text(L"COLOR", {card_inner_left, card_y, card_inner_left + 120.0F, card_y + 14.0F}, accent, 9.0F);
+            card_y += 16.0F;
+            float swatch_left = card_inner_left;
+            for (const auto& [color_label, color_value] : entry_colors)
+            {
+                const float swatch_width = std::max(64.0F, measure_text(color_label, 11.0F) + 22.0F);
+                const Rect swatch{swatch_left, card_y, swatch_left + swatch_width, card_y + 26.0F};
+                fill_rounded(swatch, 5.0F, {color_value->r, color_value->g, color_value->b, 1.0F});
+                const bool swatch_open = open_color_picker_ == color_picker_id(descriptor->id, color_label);
+                stroke_rounded(swatch, 5.0F, swatch_open ? text_primary : accent_dim, 1.4F);
+                text(color_label, {swatch.left + 6.0F, swatch.top, swatch.right - 6.0F, swatch.bottom},
+                    {0.05F, 0.04F, 0.07F, 1.0F}, 11.0F, TextAlign::center);
+                if (consume_click(swatch, input))
+                    open_color_picker_ = swatch_open ? -1 : color_picker_id(descriptor->id, color_label);
+                swatch_left += swatch_width + 6.0F;
+            }
+            card_y += 30.0F;
+        }
+        if (turret_entry)
+        {
+            if (button(settings_context_->esp_detailed_view ?
+                L"Detailed readouts: ON" : L"Detailed readouts: OFF (boxes only)",
+                {card_inner_left, card_y, card_inner_right, card_y + 28.0F},
+                settings_context_->esp_detailed_view, input))
+                settings_context_->esp_detailed_view = !settings_context_->esp_detailed_view;
+            card_y += 32.0F;
+        }
         y += card_height + 8.0F;
+        // The palette itself opens under the card so it never overlaps the row
+        // list, and only one swatch anywhere can be expanded at a time.
+        for (const auto& [color_label, color_value] : entry_colors)
+        {
+            if (open_color_picker_ != color_picker_id(descriptor->id, color_label)) continue;
+            draw_palette(*color_value, x + 14.0F, y, input);
+        }
     }
 
     bool Overlay::combo(const std::wstring& label, std::int32_t& value, const wchar_t* const* options,
@@ -3508,10 +4434,14 @@ namespace kopt
             {x + content_width_ - 150.0F, y, x + content_width_ - 10.0F, y + 25.0F},
             accent, 12.0F, TextAlign::right);
         const Rect track{x + 2.0F, y + 28.0F, x + content_width_ - 10.0F, y + 34.0F};
-        fill(track, surface);
+        fill_rounded(track, 3.0F, surface);
         float ratio = (value - minimum) / (maximum - minimum);
         ratio = std::clamp(ratio, 0.0F, 1.0F);
-        fill({track.left, track.top, track.left + (track.right - track.left) * ratio, track.bottom}, accent);
+        const float fill_right = track.left + (track.right - track.left) * ratio;
+        fill_rounded({track.left, track.top, std::max(track.left + 6.0F, fill_right), track.bottom}, 3.0F, accent);
+        // The track fill alone gave no sense of a draggable handle at its edge;
+        // a small knob is the same affordance fix as the toggle switch's knob.
+        fill_circle(fill_right, (track.top + track.bottom) * 0.5F, 6.0F, text_primary);
         const Rect hit{track.left, track.top - 7.0F, track.right, track.bottom + 7.0F};
         std::size_t slider_id = std::hash<std::wstring>{}(label);
         slider_id ^= static_cast<std::size_t>(active_tab_ + 1) * 0x9E3779B185EBCA87ULL;
@@ -3537,8 +4467,8 @@ namespace kopt
         text(label, {x + 2.0F, y, x + content_width_ - 10.0F, y + 24.0F}, text_primary, 12.0F);
         const Rect field{x + 2.0F, y + 25.0F, x + content_width_ - 10.0F, y + 59.0F};
         const bool active = active_text_input_ == id;
-        fill(field, active ? surface_hover : surface);
-        stroke(field, active ? accent : accent_dim);
+        fill_rounded(field, 6.0F, active ? surface_hover : surface);
+        stroke_rounded(field, 6.0F, active ? accent : accent_dim, 1.0F);
         std::wstring shown = value;
         if (active) shown += L"|";
         text(shown.empty() ? L"Type to filter..." : shown,

@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -25,7 +26,10 @@ namespace kopt
         structure,
         player,
         drop,
-        death_cache
+        death_cache,
+        horde_crate,
+        element_node,
+        explorer_note
     };
 
     struct Actor
@@ -48,6 +52,10 @@ namespace kopt
         bool sleeping{};
         bool turret{};
         std::int32_t quantity{1};
+        std::int32_t horde_wave{-1};
+        std::int32_t horde_tier{};
+        std::int32_t element_reward{-1};
+        bool reward_exact{};
         std::int32_t turret_ammo{-1};
         std::uint8_t turret_range{};
         std::uint8_t turret_targeting{};
@@ -59,6 +67,11 @@ namespace kopt
         std::wstring name;
         std::wstring tribe;
         std::wstring held_item;
+        std::wstring reward_preview;
+        // Why a crate's loot readout ended up exact or "pending": which property
+        // resolved, what the inventory pointer was, how many slots came back.
+        // Logged once per actor so a failing path can be read after the fact.
+        std::wstring reward_diagnostic;
         std::array<std::int32_t, 5> armor_types{};
         std::array<float, 5> armor_ratios{};
         std::array<Vec3, 23> bones{};
@@ -128,6 +141,31 @@ namespace kopt
         float remaining_s{};
     };
 
+    // One past contact, kept long after its alert expired. Alerts answer "what is
+    // happening"; the journal answers "what happened while I was away", so it is
+    // retained by wall-clock age rather than by the alert lifetime.
+    //
+    // Shaped for eventual sharing between players through a backend, which is why
+    // it stores absolute facts rather than only what one observer saw: the world
+    // position of the contact (another player's "180 m away" is not yours), the
+    // event kind as a stable enum rather than a display string, an absolute
+    // timestamp, and the world generation the sighting belongs to. distance and
+    // bearing stay as observer-relative conveniences for the local panel.
+    struct JournalEntry
+    {
+        std::chrono::system_clock::time_point time{};
+        AlertKind kind{};
+        std::wstring title;
+        std::wstring name;
+        std::wstring tribe;
+        Vec3 position{};
+        std::uint64_t world_generation{};
+        float distance_m{};
+        // Compass bearing from the local player to the contact, degrees, or NaN
+        // when the event has no single actor behind it (an enemy-group alert).
+        float bearing_deg{};
+    };
+
     struct Snapshot
     {
         std::vector<Actor> actors;
@@ -141,7 +179,11 @@ namespace kopt
         std::uintptr_t local_character{};
         std::uintptr_t camera_manager{};
         std::int32_t local_team{};
+        std::wstring local_pawn_class_name;
+        std::wstring controller_pawn_class_name;
         bool local_mounted{};
+        bool controller_reports_riding{};
+        bool managarmr_safe_aim{};
         bool local_valid{};
         bool aim_armed{};
         bool aim_active{};
@@ -167,6 +209,8 @@ namespace kopt
         void queue_freecam_mouse_delta(long x, long y) noexcept;
         void restore_transient_state();
         void clear_alert_history();
+        [[nodiscard]] const std::vector<JournalEntry>& journal() const noexcept { return journal_; }
+        void clear_journal() noexcept { journal_.clear(); }
         [[nodiscard]] const Snapshot& snapshot() const noexcept { return snapshot_; }
         [[nodiscard]] bool world_to_screen(const Vec3& world, float width, float height, Vec2& screen) const;
         [[nodiscard]] const std::wstring& status() const noexcept { return status_; }
@@ -176,7 +220,42 @@ namespace kopt
         void clear_aim_trace() noexcept;
         bool export_aim_trace(const std::filesystem::path& path) const;
 
+        // Time series kept per actor so features can reason about change rather
+        // than a single instant: torpor drain, movement trails, contact history.
+        // Sampled on its own cadence, not every refresh, and only for actors the
+        // features actually care about - keeping this for every tracked actor
+        // would cost memory and frame time for nothing.
+        struct ActorSample
+        {
+            double world_time{};
+            Vec3 position{};
+            float torpor{};
+            float health{};
+        };
+        struct ActorHistory
+        {
+            static constexpr std::size_t capacity = 64;
+            std::array<ActorSample, capacity> samples{};
+            std::size_t next{};
+            std::size_t filled{};
+            std::uint64_t world_generation{};
+            void push(const ActorSample& sample)
+            {
+                samples[next] = sample;
+                next = (next + 1) % capacity;
+                filled = std::min(filled + 1, capacity);
+            }
+            // Oldest first, so callers can walk a trail forwards in time.
+            [[nodiscard]] const ActorSample& at(const std::size_t index) const
+            {
+                const std::size_t start = filled == capacity ? next : 0;
+                return samples[(start + index) % capacity];
+            }
+        };
+        [[nodiscard]] const ActorHistory* actor_history(std::uintptr_t address) const;
+
     private:
+        void sample_actor_history();
         struct ClassMeta
         {
             ActorKind kind{ActorKind::other};
@@ -232,6 +311,15 @@ namespace kopt
         bool read_player_bones(std::uintptr_t address, const Vec3& actor_position, Actor& actor);
         void read_player_equipment(std::uintptr_t address, Actor& actor);
         float read_item_stat(std::uintptr_t item, int stat_index) const;
+        struct PropertyMeta
+        {
+            std::uintptr_t field{};
+            std::int32_t offset{-1};
+        };
+        PropertyMeta property_meta(std::uintptr_t class_address, const wchar_t* property_name);
+        bool read_bool_property(std::uintptr_t instance, std::uintptr_t class_address,
+            const wchar_t* property_name, bool& value);
+        void read_horde_details(std::uintptr_t class_address, Actor& actor);
         ClassMeta class_meta(std::uintptr_t class_address);
         std::wstring object_name(std::uintptr_t object_address);
         std::wstring resolve_name(std::int32_t index, std::int32_t number);
@@ -241,8 +329,10 @@ namespace kopt
         bool engine_object_live(std::uintptr_t address) const;
         bool engine_actor_live(const Actor& actor) const;
         void run_aim(Settings& settings, float delta_seconds);
+        void restore_managarmr_aim_offset() noexcept;
         void record_aim_sample(const Settings& settings, float delta_seconds);
         void run_camera(Settings& settings, float delta_seconds);
+        void restore_freecam_near_clip() noexcept;
         void update_no_recoil(const Settings& settings);
         void restore_no_recoil() noexcept;
         void update_no_sway(const Settings& settings);
@@ -281,7 +371,10 @@ namespace kopt
         std::uint64_t world_generation_{};
         Snapshot snapshot_{};
         std::unordered_map<std::uintptr_t, ClassMeta> class_cache_;
+        std::unordered_map<std::wstring, PropertyMeta> property_cache_;
         std::unordered_map<std::int32_t, std::wstring> name_cache_;
+        std::unordered_map<std::uintptr_t, ActorHistory> actor_history_;
+        std::chrono::steady_clock::time_point last_history_sample_{};
         std::chrono::steady_clock::time_point last_capture_{};
         std::chrono::steady_clock::time_point last_live_refresh_{};
         std::chrono::steady_clock::time_point chams_ready_after_{};
@@ -324,6 +417,7 @@ namespace kopt
         };
         std::unordered_map<std::uintptr_t, AlertTracker> alert_trackers_;
         std::vector<ActiveAlert> active_alerts_;
+        std::vector<JournalEntry> journal_;
         std::chrono::steady_clock::time_point alerts_ready_after_{};
         std::uint64_t next_alert_id_{1};
         int previous_enemy_group_count_{};
@@ -364,6 +458,8 @@ namespace kopt
         bool last_menu_open_{true};
         std::uintptr_t locked_target_{};
         float locked_target_occluded_seconds_{};
+        std::uintptr_t managarmr_aim_offset_pawn_{};
+        bool managarmr_aim_offset_dirty_{};
         std::array<AimTelemetry, 600> aim_trace_{};
         std::size_t aim_trace_head_{};
         std::size_t aim_trace_count_{};
@@ -379,5 +475,7 @@ namespace kopt
         Vec3 freecam_restore_rotation_{};
         float freecam_restore_fov_{};
         std::uintptr_t freecam_pov_{};
+        float freecam_restore_near_clip_{};
+        bool freecam_near_clip_applied_{};
     };
 }

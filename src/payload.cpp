@@ -21,6 +21,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 using kopt::ComPtr;
 
@@ -31,6 +32,14 @@ namespace
     using CameraUpdateFn = void(__fastcall*)(void*, float);
     using DrawIndexedFn = void(__stdcall*)(ID3D11DeviceContext*, UINT, UINT, INT);
     using DrawIndexedInstancedFn = void(__stdcall*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
+    // Skinned meshes rendered through the GPU skin cache (the default on the
+    // ShooterGame UE4 version this targets) issue their draws through
+    // DrawIndexedInstancedIndirect/DrawInstancedIndirect, not the two slots
+    // above. Missing these means the hook never sees the first-person mesh's
+    // real draw call at all, so bForceWireframe renders untouched and Solid
+    // style can never engage even though the hook itself is installed.
+    using DrawIndexedInstancedIndirectFn = void(__stdcall*)(ID3D11DeviceContext*, ID3D11Buffer*, UINT);
+    using DrawInstancedIndirectFn = void(__stdcall*)(ID3D11DeviceContext*, ID3D11Buffer*, UINT);
 
     HMODULE g_module{};
     kopt::Settings g_settings;
@@ -46,9 +55,13 @@ namespace
     void** g_camera_slot{};
     void** g_draw_indexed_slot{};
     void** g_draw_indexed_instanced_slot{};
+    void** g_draw_indexed_instanced_indirect_slot{};
+    void** g_draw_instanced_indirect_slot{};
     CameraUpdateFn g_original_camera_update{};
     DrawIndexedFn g_original_draw_indexed{};
     DrawIndexedInstancedFn g_original_draw_indexed_instanced{};
+    DrawIndexedInstancedIndirectFn g_original_draw_indexed_instanced_indirect{};
+    DrawInstancedIndirectFn g_original_draw_instanced_indirect{};
     HWND g_game_window{};
     IDXGISwapChain* g_game_swap_chain{};
     WNDPROC g_original_wndproc{};
@@ -64,6 +77,19 @@ namespace
     std::atomic<std::uint32_t> g_esp_toggle_key{VK_F7};
     std::atomic<std::uint32_t> g_panic_key{VK_F12};
     std::atomic<bool> g_freecam_active{};
+    std::atomic<bool> g_freecam_pose_valid{};
+    std::atomic<std::uint32_t> g_freecam_pose_sequence{};
+    std::atomic<float> g_freecam_position_x{};
+    std::atomic<float> g_freecam_position_y{};
+    std::atomic<float> g_freecam_position_z{};
+    std::atomic<float> g_freecam_rotation_x{};
+    std::atomic<float> g_freecam_rotation_y{};
+    std::atomic<float> g_freecam_rotation_z{};
+    std::atomic<bool> g_fov_override_active{};
+    std::atomic<float> g_custom_fov{112.5F};
+    std::atomic<int> g_camera_hook_idle_frames{};
+    std::uintptr_t g_locked_fov_manager{};
+    float g_locked_fov_value{};
     std::atomic<int> g_local_chams_draw_mode{-1};
     std::atomic<std::uint32_t> g_local_chams_color{0xA33DFFFFU};
     std::atomic<int> g_freecam_wheel{};
@@ -76,6 +102,10 @@ namespace
     std::uint32_t g_logged_skeleton_guard_hits{};
     bool g_logged_local_valid{};
     bool g_logged_aim_active{};
+    bool g_logged_managarmr_safe_aim{};
+    bool g_logged_mounted_safe_mode{};
+    std::unordered_map<std::uintptr_t, std::wstring> g_logged_horde_previews;
+    std::unordered_map<std::uintptr_t, std::wstring> g_logged_explorer_notes;
     int g_cursor_show_adjustment{};
     std::uint64_t g_game_swap_chain_area{};
     float g_pointer_scale_x{1.0F};
@@ -94,6 +124,7 @@ namespace
     std::uintptr_t g_game_module_base{};
     alignas(8) std::uint64_t g_none_fname{};
     std::atomic<std::uint32_t> g_skeleton_guard_hits{};
+    std::atomic<std::uint64_t> g_camera_tick_lock_skips{};
     std::atomic<std::uint32_t> g_diagnostic_feature_flags{};
     struct PanicState
     {
@@ -102,10 +133,64 @@ namespace
         bool esp{};
         bool freecam{};
         bool local_chams{};
-        bool enemy_chams{};
         bool no_recoil{};
         bool no_sway{};
     } g_panic_state;
+
+    void publish_freecam_pose(const kopt::Vec3& position, const kopt::Vec3& rotation) noexcept
+    {
+        if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+            !std::isfinite(rotation.x) || !std::isfinite(rotation.y) || !std::isfinite(rotation.z)) return;
+        g_freecam_pose_sequence.fetch_add(1, std::memory_order_acq_rel);
+        g_freecam_position_x.store(position.x, std::memory_order_relaxed);
+        g_freecam_position_y.store(position.y, std::memory_order_relaxed);
+        g_freecam_position_z.store(position.z, std::memory_order_relaxed);
+        g_freecam_rotation_x.store(rotation.x, std::memory_order_relaxed);
+        g_freecam_rotation_y.store(rotation.y, std::memory_order_relaxed);
+        g_freecam_rotation_z.store(rotation.z, std::memory_order_relaxed);
+        g_freecam_pose_sequence.fetch_add(1, std::memory_order_release);
+        g_freecam_pose_valid.store(true, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool load_freecam_pose(kopt::Vec3& position, kopt::Vec3& rotation) noexcept
+    {
+        if (!g_freecam_pose_valid.load(std::memory_order_acquire)) return false;
+        for (int attempt = 0; attempt < 4; ++attempt)
+        {
+            const std::uint32_t before = g_freecam_pose_sequence.load(std::memory_order_acquire);
+            if ((before & 1U) != 0U) continue;
+            position = {g_freecam_position_x.load(std::memory_order_relaxed),
+                g_freecam_position_y.load(std::memory_order_relaxed),
+                g_freecam_position_z.load(std::memory_order_relaxed)};
+            rotation = {g_freecam_rotation_x.load(std::memory_order_relaxed),
+                g_freecam_rotation_y.load(std::memory_order_relaxed),
+                g_freecam_rotation_z.load(std::memory_order_relaxed)};
+            const std::uint32_t after = g_freecam_pose_sequence.load(std::memory_order_acquire);
+            if (before == after && (after & 1U) == 0U) return true;
+        }
+        return false;
+    }
+
+    void hold_freecam_pose(void* manager) noexcept
+    {
+        if (manager == nullptr || !g_freecam_active.load(std::memory_order_acquire)) return;
+        constexpr std::uintptr_t camera_pov_offset = 0x4D0 + 0x8;
+        auto* const pov = reinterpret_cast<std::uint8_t*>(manager) + camera_pov_offset;
+        kopt::Vec3 position{};
+        kopt::Vec3 rotation{};
+        if (!load_freecam_pose(position, rotation))
+        {
+            SIZE_T position_read{};
+            SIZE_T rotation_read{};
+            if (ReadProcessMemory(GetCurrentProcess(), pov, &position, sizeof(position), &position_read) == FALSE ||
+                ReadProcessMemory(GetCurrentProcess(), pov + 0xC, &rotation, sizeof(rotation), &rotation_read) == FALSE ||
+                position_read != sizeof(position) || rotation_read != sizeof(rotation)) return;
+            publish_freecam_pose(position, rotation);
+        }
+        SIZE_T written{};
+        WriteProcessMemory(GetCurrentProcess(), pov, &position, sizeof(position), &written);
+        WriteProcessMemory(GetCurrentProcess(), pov + 0xC, &rotation, sizeof(rotation), &written);
+    }
 
     void log_line(const std::wstring& message)
     {
@@ -293,11 +378,31 @@ namespace
 
     bool ensure_solid_chams_pipeline(ID3D11DeviceContext* context, const D3D11_RASTERIZER_DESC& source)
     {
-        if (context == nullptr) return false;
+        // Every branch below used to fail silently, so a broken solid-chams
+        // pipeline was indistinguishable from "not hooked at all": the caller
+        // just falls back to draw() with whatever wireframe state the engine
+        // already bound. Each failure now logs once so the real cause shows
+        // up in the log instead of just "Solid looks like Wireframe".
+        static std::atomic<bool> logged_no_context{};
+        static std::atomic<bool> logged_no_device{};
+        static std::atomic<bool> logged_compile_failure{};
+        static std::atomic<bool> logged_pixel_shader_failure{};
+        static std::atomic<bool> logged_buffer_failure{};
+        static std::atomic<bool> logged_blend_failure{};
+        static std::atomic<bool> logged_rasterizer_failure{};
+        if (context == nullptr)
+        {
+            if (!logged_no_context.exchange(true)) log_line(L"Solid chams: DrawIndexed context is null");
+            return false;
+        }
         ID3D11Device* raw_device{};
         context->GetDevice(&raw_device);
         ComPtr<ID3D11Device> device(raw_device);
-        if (device == nullptr) return false;
+        if (device == nullptr)
+        {
+            if (!logged_no_device.exchange(true)) log_line(L"Solid chams: ID3D11DeviceContext::GetDevice returned null");
+            return false;
+        }
         if (g_chams_device.get() != device.get())
         {
             g_chams_solid_rasterizer.reset();
@@ -315,15 +420,41 @@ namespace
                 "float4 main():SV_TARGET{return tint;}";
             ComPtr<ID3DBlob> shader;
             ComPtr<ID3DBlob> errors;
-            if (FAILED(D3DCompile(source_code, sizeof(source_code) - 1, nullptr, nullptr, nullptr,
-                "main", "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shader.put(), errors.put())) ||
-                FAILED(device->CreatePixelShader(shader->GetBufferPointer(), shader->GetBufferSize(),
-                    nullptr, g_chams_pixel_shader.put()))) return false;
+            const HRESULT compile_result = D3DCompile(source_code, sizeof(source_code) - 1, nullptr, nullptr,
+                nullptr, "main", "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, shader.put(), errors.put());
+            if (FAILED(compile_result))
+            {
+                if (!logged_compile_failure.exchange(true))
+                {
+                    std::string narrow_error(errors != nullptr
+                        ? static_cast<const char*>(errors->GetBufferPointer()) : "no D3DBlob error text");
+                    log_line(std::format(L"Solid chams: D3DCompile failed hr=0x{:08X} ({})",
+                        static_cast<std::uint32_t>(compile_result),
+                        std::wstring(narrow_error.begin(), narrow_error.end())));
+                }
+                return false;
+            }
+            const HRESULT shader_result = device->CreatePixelShader(shader->GetBufferPointer(),
+                shader->GetBufferSize(), nullptr, g_chams_pixel_shader.put());
+            if (FAILED(shader_result))
+            {
+                if (!logged_pixel_shader_failure.exchange(true))
+                    log_line(std::format(L"Solid chams: CreatePixelShader failed hr=0x{:08X}",
+                        static_cast<std::uint32_t>(shader_result)));
+                return false;
+            }
             D3D11_BUFFER_DESC buffer{};
             buffer.ByteWidth = 16;
             buffer.Usage = D3D11_USAGE_DEFAULT;
             buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            if (FAILED(device->CreateBuffer(&buffer, nullptr, g_chams_color_buffer.put()))) return false;
+            const HRESULT buffer_result = device->CreateBuffer(&buffer, nullptr, g_chams_color_buffer.put());
+            if (FAILED(buffer_result))
+            {
+                if (!logged_buffer_failure.exchange(true))
+                    log_line(std::format(L"Solid chams: CreateBuffer(tint cbuffer) failed hr=0x{:08X}",
+                        static_cast<std::uint32_t>(buffer_result)));
+                return false;
+            }
             D3D11_BLEND_DESC blend{};
             blend.RenderTarget[0].BlendEnable = TRUE;
             blend.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
@@ -333,7 +464,15 @@ namespace
             blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
             blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
             blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-            if (FAILED(device->CreateBlendState(&blend, g_chams_blend_state.put()))) return false;
+            const HRESULT blend_result = device->CreateBlendState(&blend, g_chams_blend_state.put());
+            if (FAILED(blend_result))
+            {
+                if (!logged_blend_failure.exchange(true))
+                    log_line(std::format(L"Solid chams: CreateBlendState failed hr=0x{:08X}",
+                        static_cast<std::uint32_t>(blend_result)));
+                return false;
+            }
+            log_line(L"Solid chams: pixel shader/cbuffer/blend state created");
         }
         D3D11_RASTERIZER_DESC solid = source;
         solid.FillMode = D3D11_FILL_SOLID;
@@ -341,7 +480,17 @@ namespace
             std::memcmp(&solid, &g_chams_rasterizer_description, sizeof(solid)) != 0)
         {
             g_chams_solid_rasterizer.reset();
-            if (FAILED(device->CreateRasterizerState(&solid, g_chams_solid_rasterizer.put()))) return false;
+            const HRESULT rasterizer_result = device->CreateRasterizerState(&solid, g_chams_solid_rasterizer.put());
+            if (FAILED(rasterizer_result))
+            {
+                if (!logged_rasterizer_failure.exchange(true))
+                    log_line(std::format(L"Solid chams: CreateRasterizerState failed hr=0x{:08X} "
+                        L"(source CullMode={} DepthClipEnable={} MultisampleEnable={})",
+                        static_cast<std::uint32_t>(rasterizer_result),
+                        static_cast<int>(source.CullMode), source.DepthClipEnable != 0,
+                        source.MultisampleEnable != 0));
+                return false;
+            }
             g_chams_rasterizer_description = solid;
             g_chams_rasterizer_valid = true;
         }
@@ -375,12 +524,25 @@ namespace
         ID3D11RenderTargetView* raw_render_target{};
         context->OMGetRenderTargets(1, &raw_render_target, nullptr);
         ComPtr<ID3D11RenderTargetView> render_target(raw_render_target);
-        if (render_target == nullptr || !ensure_solid_chams_pipeline(context, rasterizer_description))
+        if (render_target == nullptr)
+        {
+            static std::atomic<bool> logged_no_render_target{};
+            if (!logged_no_render_target.exchange(true))
+                log_line(L"Solid chams: forced-wireframe DrawIndexed had no bound render target, "
+                    L"falling back to the engine's own wireframe draw");
+            draw();
+            finish();
+            return;
+        }
+        if (!ensure_solid_chams_pipeline(context, rasterizer_description))
         {
             draw();
             finish();
             return;
         }
+        static std::atomic<bool> logged_engaged{};
+        if (!logged_engaged.exchange(true))
+            log_line(L"Solid chams: pipeline engaged, overriding a forced-wireframe draw with the tint shader");
         const std::uint32_t packed = g_local_chams_color.load(std::memory_order_acquire);
         if (packed != g_uploaded_chams_color)
         {
@@ -440,9 +602,26 @@ namespace
         });
     }
 
+    void __stdcall hooked_draw_indexed_instanced_indirect(ID3D11DeviceContext* context,
+        ID3D11Buffer* buffer_for_args, const UINT aligned_byte_offset_for_args)
+    {
+        draw_with_local_chams(context, [&]() {
+            g_original_draw_indexed_instanced_indirect(context, buffer_for_args, aligned_byte_offset_for_args);
+        });
+    }
+
+    void __stdcall hooked_draw_instanced_indirect(ID3D11DeviceContext* context,
+        ID3D11Buffer* buffer_for_args, const UINT aligned_byte_offset_for_args)
+    {
+        draw_with_local_chams(context, [&]() {
+            g_original_draw_instanced_indirect(context, buffer_for_args, aligned_byte_offset_for_args);
+        });
+    }
+
     void ensure_draw_indexed_hook(IDXGISwapChain* swap_chain)
     {
-        if ((g_draw_indexed_slot != nullptr && g_draw_indexed_instanced_slot != nullptr) ||
+        if ((g_draw_indexed_slot != nullptr && g_draw_indexed_instanced_slot != nullptr &&
+            g_draw_indexed_instanced_indirect_slot != nullptr && g_draw_instanced_indirect_slot != nullptr) ||
             swap_chain == nullptr) return;
         ComPtr<ID3D11Device> device;
         if (FAILED(swap_chain->GetDevice(__uuidof(ID3D11Device),
@@ -472,15 +651,94 @@ namespace
                 log_line(L"D3D11 DrawIndexedInstanced chams hook installed");
             }
         }
+        // Slots 39/40: DrawIndexedInstancedIndirect / DrawInstancedIndirect. This is
+        // the GPU-skin-cache draw path; ARK's character meshes go through here, not
+        // through the two slots above.
+        if (g_draw_indexed_instanced_indirect_slot == nullptr)
+        {
+            void** slot = &vtable[39];
+            if (patch_slot(slot, reinterpret_cast<void*>(&hooked_draw_indexed_instanced_indirect),
+                reinterpret_cast<void**>(&g_original_draw_indexed_instanced_indirect)))
+            {
+                g_draw_indexed_instanced_indirect_slot = slot;
+                log_line(L"D3D11 DrawIndexedInstancedIndirect chams hook installed");
+            }
+        }
+        if (g_draw_instanced_indirect_slot == nullptr)
+        {
+            void** slot = &vtable[40];
+            if (patch_slot(slot, reinterpret_cast<void*>(&hooked_draw_instanced_indirect),
+                reinterpret_cast<void**>(&g_original_draw_instanced_indirect)))
+            {
+                g_draw_instanced_indirect_slot = slot;
+                log_line(L"D3D11 DrawInstancedIndirect chams hook installed");
+            }
+        }
+    }
+
+    void sync_draw_indexed_hooks(IDXGISwapChain* swap_chain, const bool required)
+    {
+        if (required)
+        {
+            ensure_draw_indexed_hook(swap_chain);
+            return;
+        }
+        if (g_draw_indexed_slot == nullptr && g_draw_indexed_instanced_slot == nullptr &&
+            g_draw_indexed_instanced_indirect_slot == nullptr && g_draw_instanced_indirect_slot == nullptr) return;
+        g_local_chams_draw_mode.store(-1, std::memory_order_release);
+        restore_slot(g_draw_indexed_slot, reinterpret_cast<void*>(g_original_draw_indexed));
+        restore_slot(g_draw_indexed_instanced_slot,
+            reinterpret_cast<void*>(g_original_draw_indexed_instanced));
+        restore_slot(g_draw_indexed_instanced_indirect_slot,
+            reinterpret_cast<void*>(g_original_draw_indexed_instanced_indirect));
+        restore_slot(g_draw_instanced_indirect_slot,
+            reinterpret_cast<void*>(g_original_draw_instanced_indirect));
+        g_draw_indexed_slot = nullptr;
+        g_draw_indexed_instanced_slot = nullptr;
+        g_draw_indexed_instanced_indirect_slot = nullptr;
+        g_draw_instanced_indirect_slot = nullptr;
+        g_chams_solid_rasterizer.reset();
+        g_chams_color_buffer.reset();
+        g_chams_pixel_shader.reset();
+        g_chams_blend_state.reset();
+        g_chams_device.reset();
+        g_chams_rasterizer_valid = false;
+        log_line(L"D3D11 chams hooks removed (feature inactive)");
     }
 
     void __fastcall hooked_camera_update(void* manager, const float delta_seconds)
     {
         g_active_callbacks.fetch_add(1, std::memory_order_acq_rel);
         g_original_camera_update(manager, delta_seconds);
+        // FOV must not depend on the render-thread state mutex. Actor discovery may
+        // own that mutex for a camera tick; letting the engine FOV through on that
+        // frame creates a visible zoom/unzoom pulse. ADS is still left untouched.
+        if (g_fov_override_active.load(std::memory_order_relaxed) &&
+            (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0)
+        {
+            const float fov = g_custom_fov.load(std::memory_order_relaxed);
+            SIZE_T written{};
+            WriteProcessMemory(GetCurrentProcess(),
+                reinterpret_cast<std::uint8_t*>(manager) + 0x500, &fov, sizeof(fov), &written);
+        }
         if (!g_stop.load(std::memory_order_acquire))
         {
-            std::scoped_lock lock(g_state_mutex);
+            // UpdateCamera runs on ARK's game thread while Present/update runs on the
+            // render thread. Never stall the game thread behind actor discovery: mounted
+            // flight (especially IceJumper) consumes the freshly produced camera direction
+            // for movement and becomes jerky/stale if this callback waits on the mutex.
+            std::unique_lock lock(g_state_mutex, std::try_to_lock);
+            if (!lock.owns_lock())
+            {
+                // UpdateCamera has just restored the player camera. If Present owns
+                // the state mutex, keep the last complete freecam pose for this tick
+                // instead of exposing that engine pose as a one-frame teleport.
+                if (g_freecam_active.load(std::memory_order_acquire))
+                    hold_freecam_pose(manager);
+                g_camera_tick_lock_skips.fetch_add(1, std::memory_order_relaxed);
+                g_active_callbacks.fetch_sub(1, std::memory_order_acq_rel);
+                return;
+            }
             const int wheel_steps = g_freecam_wheel.exchange(0, std::memory_order_acq_rel);
             if (wheel_steps != 0)
             {
@@ -488,13 +746,18 @@ namespace
                 g_settings.freecam_speed = std::clamp(g_settings.freecam_speed, 100.0F, 10000.0F);
             }
             g_runtime.on_game_camera_tick(g_settings, reinterpret_cast<std::uintptr_t>(manager), delta_seconds);
+            if (g_settings.freecam && g_runtime.snapshot().camera.valid)
+                publish_freecam_pose(g_runtime.snapshot().camera.location, g_runtime.snapshot().camera.rotation);
+            else
+                g_freecam_pose_valid.store(false, std::memory_order_release);
         }
         else if (!g_unload_cleanup_requested.exchange(true, std::memory_order_acq_rel))
         {
             std::scoped_lock lock(g_state_mutex);
             g_settings.freecam = false;
+            g_freecam_active.store(false, std::memory_order_release);
+            g_freecam_pose_valid.store(false, std::memory_order_release);
             g_settings.local_chams = false;
-            g_settings.enemy_chams = false;
             g_settings.no_recoil = false;
             g_settings.no_sway = false;
             g_runtime.on_game_camera_tick(g_settings, reinterpret_cast<std::uintptr_t>(manager), delta_seconds);
@@ -525,13 +788,80 @@ namespace
         }
     }
 
+    void sync_camera_hook(const bool required)
+    {
+        if (required)
+        {
+            g_camera_hook_idle_frames.store(0, std::memory_order_relaxed);
+            ensure_camera_hook();
+            return;
+        }
+        if (g_camera_slot == nullptr)
+        {
+            g_camera_hook_idle_frames.store(0, std::memory_order_relaxed);
+            return;
+        }
+        // Keep a short cleanup window so the game-thread callback observes disabled
+        // settings and restores any transient recoil/sway/freecam/chams state before
+        // the vtable is returned to the engine.
+        const int idle_frames = g_camera_hook_idle_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (idle_frames < 4) return;
+        restore_slot(g_camera_slot, reinterpret_cast<void*>(g_original_camera_update));
+        g_camera_slot = nullptr;
+        g_camera_hook_idle_frames.store(0, std::memory_order_relaxed);
+        log_line(L"Camera game-tick hook removed (all dependent features inactive)");
+    }
+
+    bool readable_object(const std::uintptr_t address) noexcept
+    {
+        if (address < 0x10000) return false;
+        MEMORY_BASIC_INFORMATION information{};
+        if (VirtualQuery(reinterpret_cast<const void*>(address), &information,
+            sizeof(information)) != sizeof(information)) return false;
+        return information.State == MEM_COMMIT &&
+            (information.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+    }
+
+    void sync_fov_lock(const std::uintptr_t manager, const bool enabled, const float fov)
+    {
+        // Exact ShooterGame.pdb 358.26 symbols. SetFOV/UnlockFOV update the native
+        // bLockedFOV + LockedFOV state consumed by UpdateCamera, avoiding a render-thread
+        // tug-of-war with CameraCache.POV.FOV. Unlock during RMB so ADS remains native.
+        constexpr std::uintptr_t set_fov_rva = 0x2AB5BD0;
+        constexpr std::uintptr_t unlock_fov_rva = 0x2AB5BE0;
+        const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        if (module == 0) return;
+        using SetFovFn = void(__fastcall*)(void*, float);
+        using UnlockFovFn = void(__fastcall*)(void*);
+        const auto set_fov = reinterpret_cast<SetFovFn>(module + set_fov_rva);
+        const auto unlock_fov = reinterpret_cast<UnlockFovFn>(module + unlock_fov_rva);
+
+        if ((!enabled || manager != g_locked_fov_manager) &&
+            readable_object(g_locked_fov_manager))
+            unlock_fov(reinterpret_cast<void*>(g_locked_fov_manager));
+        if (!enabled || !readable_object(manager))
+        {
+            g_locked_fov_manager = 0;
+            g_locked_fov_value = 0.0F;
+            return;
+        }
+        if (manager != g_locked_fov_manager || std::abs(fov - g_locked_fov_value) > 0.001F)
+        {
+            set_fov(reinterpret_cast<void*>(manager), fov);
+            g_locked_fov_manager = manager;
+            g_locked_fov_value = fov;
+        }
+    }
+
     void sync_hotkeys()
     {
         g_menu_key.store(g_settings.menu_key, std::memory_order_release);
         g_unload_key.store(g_settings.unload_key, std::memory_order_release);
         g_freecam_key.store(g_settings.freecam_key, std::memory_order_release);
         g_esp_toggle_key.store(g_settings.esp_toggle_key, std::memory_order_release);
-        g_freecam_active.store(g_settings.freecam, std::memory_order_release);
+        const bool previous_freecam = g_freecam_active.exchange(g_settings.freecam, std::memory_order_acq_rel);
+        if (previous_freecam != g_settings.freecam)
+            g_freecam_pose_valid.store(false, std::memory_order_release);
         const std::uint32_t diagnostic_flags =
             (g_settings.esp_enabled ? (1U << 0) : 0U) |
             (g_settings.player_aim ? (1U << 1) : 0U) |
@@ -645,8 +975,25 @@ namespace
             return;
         }
         const bool was_down = g_polled_left_down.exchange(down, std::memory_order_acq_rel);
-        if (down && !was_down) g_input.left_pressed.store(true, std::memory_order_release);
+        const bool left_pressed_edge = down && !was_down;
+        if (left_pressed_edge) g_input.left_pressed.store(true, std::memory_order_release);
         g_input.left_down.store(down, std::memory_order_release);
+        // WM_RBUTTONDOWN/WM_MBUTTONDOWN/WM_XBUTTONDOWN only reach game_wndproc if
+        // the game hasn't claimed the mouse for raw/exclusive input, which on this
+        // build it effectively always has outside of menu clicks. Track real
+        // up-then-down edges for the other mouse buttons every frame (not just
+        // while a bind capture is armed) so the edge state is already correct the
+        // instant capture arms, exactly like left_pressed_edge above already is.
+        static constexpr std::array<int, 4> other_mouse_buttons{
+            VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2};
+        static std::array<bool, other_mouse_buttons.size()> other_mouse_was_down{};
+        std::array<bool, other_mouse_buttons.size()> other_mouse_edge{};
+        for (std::size_t index = 0; index < other_mouse_buttons.size(); ++index)
+        {
+            const bool button_down = (GetAsyncKeyState(other_mouse_buttons[index]) & 0x8000) != 0;
+            other_mouse_edge[index] = button_down && !other_mouse_was_down[index];
+            other_mouse_was_down[index] = button_down;
+        }
         if (g_input.binding_capture.load(std::memory_order_acquire))
         {
             static constexpr std::array<int, 6> modifiers{
@@ -659,12 +1006,27 @@ namespace
                     break;
                 }
             }
+            // A naive "is the button down right now" check here captures the tail
+            // of the very click that opened the rebind box (it is, by definition,
+            // still physically held on the frame capture arms), forcing users to
+            // spam-click before a press finally landed on an already-released
+            // button. Require a real release-then-press edge instead.
+            if (left_pressed_edge) capture_binding(VK_LBUTTON, false);
+            else for (std::size_t index = 0; index < other_mouse_buttons.size(); ++index)
+            {
+                if (other_mouse_edge[index])
+                {
+                    capture_binding(other_mouse_buttons[index], false);
+                    break;
+                }
+            }
         }
     }
 
     bool capture_binding(const int key, const bool suppress_key_up)
     {
         if (!g_input.binding_capture.exchange(false, std::memory_order_acq_rel)) return false;
+        log_line(std::format(L"Binding capture: key=0x{:02X}", static_cast<unsigned>(key)));
         g_input.captured_key.store(key, std::memory_order_release);
         // WM_LBUTTONDOWN is consumed above, but the polling fallback can still observe the
         // same physical press on the next Present. Quarantine it until a full release so
@@ -895,7 +1257,6 @@ namespace
                 log_line(overlay_ready ? L"D3D11 overlay initialized" : L"D3D11 overlay initialization failed");
             if (overlay_ready)
             {
-                ensure_draw_indexed_hook(swap_chain);
                 std::scoped_lock state_lock(g_state_mutex);
                 if (g_input.toggle_menu_requested.exchange(false, std::memory_order_acq_rel))
                 {
@@ -917,13 +1278,12 @@ namespace
                     if (!g_panic_state.active)
                     {
                         g_panic_state = {true, g_settings.menu_open, g_settings.esp_enabled,
-                            g_settings.freecam, g_settings.local_chams, g_settings.enemy_chams,
+                            g_settings.freecam, g_settings.local_chams,
                             g_settings.no_recoil, g_settings.no_sway};
                         g_settings.menu_open = false;
                         g_settings.esp_enabled = false;
                         g_settings.freecam = false;
                         g_settings.local_chams = false;
-                        g_settings.enemy_chams = false;
                         g_settings.no_recoil = false;
                         g_settings.no_sway = false;
                         log_line(L"Hotkey: panic state enabled");
@@ -934,7 +1294,6 @@ namespace
                         g_settings.esp_enabled = g_panic_state.esp;
                         g_settings.freecam = g_panic_state.freecam;
                         g_settings.local_chams = g_panic_state.local_chams;
-                        g_settings.enemy_chams = g_panic_state.enemy_chams;
                         g_settings.no_recoil = g_panic_state.no_recoil;
                         g_settings.no_sway = g_panic_state.no_sway;
                         g_panic_state.active = false;
@@ -949,12 +1308,63 @@ namespace
                     delta_seconds = std::chrono::duration<float>(now - g_last_frame).count();
                 g_last_frame = now;
                 g_settings.normalize();
+                g_custom_fov.store(g_settings.camera_fov, std::memory_order_relaxed);
+                g_fov_override_active.store(g_settings.fov_override &&
+                    !g_runtime.snapshot().local_mounted, std::memory_order_relaxed);
                 g_overlay.update_feature_hotkeys(g_settings);
                 g_runtime.update(g_settings, delta_seconds);
                 const auto& snapshot = g_runtime.snapshot();
+                // Pass-through DrawIndexed hooks still intercept every render call and
+                // add cross-thread atomics even when chams are disabled. Install them
+                // only for the one feature which actually consumes those callbacks.
+                const bool mounted_safe_mode = snapshot.local_mounted;
+                g_fov_override_active.store(g_settings.fov_override && !mounted_safe_mode,
+                    std::memory_order_relaxed);
+                if (mounted_safe_mode != g_logged_mounted_safe_mode)
+                {
+                    g_logged_mounted_safe_mode = mounted_safe_mode;
+                    log_line(mounted_safe_mode ?
+                        std::format(L"Mounted-safe mode entered: ack={} controllerPawn={} controllerPawnIsDino={} ",
+                            snapshot.local_pawn_class_name, snapshot.controller_pawn_class_name,
+                            snapshot.controller_reports_riding) +
+                            L"passive camera/FOV/chams hooks suspended" :
+                        L"Mounted-safe mode exited");
+                }
+                sync_draw_indexed_hooks(swap_chain, g_settings.local_chams && !mounted_safe_mode);
+                const auto aim_tick_requested = [](const bool enabled, const std::uint32_t key,
+                    const std::int32_t mode, const bool active) {
+                    if (!enabled) return false;
+                    const bool down = (GetAsyncKeyState(static_cast<int>(key)) & 0x8000) != 0;
+                    return mode == 0 ? down : mode == 1 ? down || active : true;
+                };
+                // Player/Dino Aim select target classes, not rider state. Both remain
+                // available on foot. While mounted, only Managarmr/Wyvern use a route
+                // which avoids Controller::ControlRotation and therefore preserves WASD.
+                const bool aim_route_available = !mounted_safe_mode || snapshot.managarmr_safe_aim;
+                const bool aim_tick_required = aim_route_available &&
+                    (aim_tick_requested(g_settings.player_aim, g_settings.aim_key,
+                        g_settings.aim_activation_mode, snapshot.player_aim_active) ||
+                     aim_tick_requested(g_settings.dino_aim, g_settings.dino_aim_key,
+                        g_settings.dino_aim_activation_mode, snapshot.dino_aim_active));
+                const bool passive_game_tick_features = g_settings.no_recoil || g_settings.no_sway ||
+                    g_settings.local_chams;
+                const bool camera_tick_required = aim_tick_required ||
+                    (!mounted_safe_mode && (g_settings.freecam || passive_game_tick_features));
+                sync_camera_hook(camera_tick_required);
+
+                // A plain FOV override is a POD camera-cache update and does not justify
+                // interposing PlayerCameraManager::UpdateCamera. Keeping the vtable native
+                // while only ESP/OSD/FOV is active prevents mounted steering from inheriting
+                // callback timing or ABI side effects.
+                sync_fov_lock(snapshot.camera_manager,
+                    g_settings.fov_override && !mounted_safe_mode &&
+                        (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0,
+                    g_settings.camera_fov);
                 if (snapshot.world_generation != g_logged_world_generation)
                 {
                     g_logged_world_generation = snapshot.world_generation;
+                    g_logged_horde_previews.clear();
+                    g_logged_explorer_notes.clear();
                     log_line(std::format(L"World generation changed: {} address=0x{:X}",
                         snapshot.world_generation, snapshot.world_address));
                 }
@@ -968,6 +1378,37 @@ namespace
                     g_logged_aim_active = snapshot.aim_active;
                     log_line(snapshot.aim_active ? L"Aim activation entered fresh active state" : L"Aim activation released");
                 }
+                if (snapshot.managarmr_safe_aim != g_logged_managarmr_safe_aim)
+                {
+                    g_logged_managarmr_safe_aim = snapshot.managarmr_safe_aim;
+                    log_line(snapshot.managarmr_safe_aim ?
+                        std::format(L"Mounted movement-independent aim-offset route active: {}",
+                            snapshot.local_pawn_class_name) :
+                        L"Mounted movement-independent aim-offset route inactive");
+                }
+                for (const auto& actor : snapshot.actors)
+                {
+                    if (actor.kind != kopt::ActorKind::horde_crate && actor.kind != kopt::ActorKind::element_node)
+                        continue;
+                    std::wstring preview = actor.reward_preview;
+                    std::replace(preview.begin(), preview.end(), L'\n', L' ');
+                    const std::wstring signature = actor.class_name + L"|" + std::to_wstring(actor.horde_wave) +
+                        L"|" + actor.reward_diagnostic + L"|" + preview;
+                    if (g_logged_horde_previews[actor.address] == signature) continue;
+                    g_logged_horde_previews[actor.address] = signature;
+                    log_line(std::format(L"Horde preview 0x{:X}: class={} wave={} exact={} [{}] {}",
+                        actor.address, actor.class_name, actor.horde_wave, actor.reward_exact,
+                        actor.reward_diagnostic, preview));
+                }
+                for (const auto& actor : snapshot.actors)
+                {
+                    if (actor.kind != kopt::ActorKind::explorer_note) continue;
+                    const std::wstring signature = actor.class_name + L"|" + actor.name;
+                    if (g_logged_explorer_notes[actor.address] == signature) continue;
+                    g_logged_explorer_notes[actor.address] = signature;
+                    log_line(std::format(L"Explorer Note ESP 0x{:X}: class={} label={}",
+                        actor.address, actor.class_name, actor.name));
+                }
                 const std::uint32_t guard_hits = g_skeleton_guard_hits.load(std::memory_order_relaxed);
                 if (guard_hits != g_logged_skeleton_guard_hits)
                 {
@@ -975,8 +1416,12 @@ namespace
                     log_line(std::format(L"Flight-death skeleton guard recovered {} invalid montage slot reference(s)",
                         guard_hits));
                 }
-                ensure_camera_hook();
                 g_overlay.render(swap_chain, g_settings, g_runtime, g_input, g_settings_path);
+                if (g_settings.debug_panel)
+                {
+                    std::wstring diagnostics;
+                    if (g_overlay.take_diagnostics_line(g_runtime, diagnostics)) log_line(diagnostics);
+                }
                 if (g_input.diagnostics_bundle_requested.exchange(false, std::memory_order_acq_rel))
                 {
                     const auto bundle = write_diagnostics_bundle(nullptr, false);
@@ -1086,6 +1531,7 @@ namespace
     void uninstall_hooks()
     {
         g_local_chams_draw_mode.store(-1, std::memory_order_release);
+        sync_fov_lock(0, false, 0.0F);
         set_menu_input_mode(false);
         restore_slot(g_camera_slot, reinterpret_cast<void*>(g_original_camera_update));
         g_camera_slot = nullptr;
@@ -1095,6 +1541,12 @@ namespace
         restore_slot(g_draw_indexed_instanced_slot,
             reinterpret_cast<void*>(g_original_draw_indexed_instanced));
         g_draw_indexed_instanced_slot = nullptr;
+        restore_slot(g_draw_indexed_instanced_indirect_slot,
+            reinterpret_cast<void*>(g_original_draw_indexed_instanced_indirect));
+        g_draw_indexed_instanced_indirect_slot = nullptr;
+        restore_slot(g_draw_instanced_indirect_slot,
+            reinterpret_cast<void*>(g_original_draw_instanced_indirect));
+        g_draw_instanced_indirect_slot = nullptr;
         restore_slot(g_resize_slot, reinterpret_cast<void*>(g_original_resize));
         restore_slot(g_present_slot, reinterpret_cast<void*>(g_original_present));
         if (g_game_window != nullptr && g_original_wndproc != nullptr && IsWindow(g_game_window))
@@ -1125,6 +1577,9 @@ namespace
         log_line(L"Payload worker started");
         g_previous_exception_filter = SetUnhandledExceptionFilter(&unhandled_exception_filter);
         g_settings.load(g_settings_path);
+        g_settings.normalize();
+        g_custom_fov.store(g_settings.camera_fov, std::memory_order_relaxed);
+        g_fov_override_active.store(g_settings.fov_override, std::memory_order_relaxed);
         install_game_exception_guard();
         sync_hotkeys();
         g_menu_open.store(g_settings.menu_open, std::memory_order_release);
@@ -1165,6 +1620,16 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         DisableThreadLibraryCalls(instance);
         const HANDLE thread = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
         if (thread != nullptr) CloseHandle(thread);
+    }
+    else if (reason == DLL_PROCESS_DETACH)
+    {
+        // When the game exits normally it tears down every other thread before
+        // DllMain ever sees this, so the worker's own end-of-life save (reached
+        // only via the END-key/injector unload path, after g_stop turns true)
+        // never runs. Without this, settings changed in a session that ends by
+        // just quitting ARK were silently lost. Safe here: plain file I/O, no
+        // new threads, no other DLLs touched.
+        if (!g_settings_path.empty()) g_settings.save(g_settings_path);
     }
     return TRUE;
 }

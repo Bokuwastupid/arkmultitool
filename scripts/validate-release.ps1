@@ -66,6 +66,8 @@ Assert-True (Test-Path -LiteralPath $injector) 'Injector self-test executable is
 Assert-True ($LASTEXITCODE -eq 0) 'PE64 payload self-test failed'
 
 Assert-RvaPrefix 0x1087E60 ([byte[]](0x48,0x89,0x54,0x24,0x10,0x48)) 'AShooterPlayerController::SetControlRotation'
+Assert-RvaPrefix 0x29075A0 ([byte[]](0x40,0x53,0x48,0x83,0xEC,0x50)) 'AController::SetControlRotation'
+Assert-RvaPrefix 0x6A8D20 ([byte[]](0x48,0x89,0x54,0x24,0x10,0x48)) 'APrimalDinoCharacter::GetCurrentAimOffsetsRotation'
 Assert-RvaPrefix 0x29077D0 ([byte[]](0x40,0x55,0x56,0x57,0x41,0x56)) 'AController::LineOfSightTo'
 Assert-RvaPrefix 0x286B1F0 ([byte[]](0x48,0x89,0x5C,0x24,0x08,0x57)) 'AActor::GetActorBounds'
 Assert-RvaPrefix 0xD29420 ([byte[]](0x48,0x89,0x4C,0x24,0x08,0x48)) 'AShooterCharacter::GetRecoilMultiplier'
@@ -79,6 +81,15 @@ $unicode = [Text.Encoding]::Unicode.GetString($payloadBytes)
 $runtimeSource = Get-Content -Raw (Join-Path $projectRoot 'src\runtime.cpp')
 Assert-True ($runtimeSource.Contains('actor.address), snapshot_.camera.location, false)')) `
     'LineOfSightTo must receive the camera as its ViewPoint argument'
+Assert-True ($runtimeSource.Contains('snapshot_.managarmr_safe_aim') -and
+    $runtimeSource.Contains('current_aim_offsets_rotation = 0x1A90') -and
+    $runtimeSource.Contains('snapshot_.camera_manager +') -and
+    $runtimeSource.Contains('pawn_name.find(L"icejumper")')) `
+    'Managarmr movement-independent tracking route is missing'
+$payloadSource = Get-Content -Raw (Join-Path $projectRoot 'src\payload.cpp')
+Assert-True ($payloadSource.Contains('std::try_to_lock') -and
+    $payloadSource.Contains('g_camera_tick_lock_skips')) `
+    'Camera game-thread hook must not block behind render-thread discovery'
 foreach ($forbidden in @('Engine.ini', 'Live CFG', 'r.ScreenPercentage', 'foliage.DensityScale')) {
     Assert-True (-not $ascii.Contains($forbidden) -and -not $unicode.Contains($forbidden)) "Forbidden game-config marker is linked: $forbidden"
 }
@@ -161,7 +172,8 @@ Assert-True ($runtimeSource.Contains('snapshot_.world_address != active_world_')
 Assert-True ($injectorSource.Contains($expectedGameHash) -and $injectorSource.Contains('loaded_payload') -and
     $injectorSource.Contains('KoptRequestUnload')) 'Injector build pin, duplicate-payload guard or unload contract is missing'
 Assert-True ($injectorSource.Contains('kopt_payload_candidate.dll') -and
-    $injectorSource.Contains('std::filesystem::exists(candidate)')) 'Direct-launch candidate payload fallback is missing'
+    $injectorSource.Contains('std::filesystem::exists(payload) ? payload : candidate')) `
+    'Direct-launch payload/candidate fallback is missing'
 
 $cmake = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'CMakeLists.txt')
 $buildScript = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'build.ps1')

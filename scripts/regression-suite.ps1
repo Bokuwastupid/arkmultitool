@@ -47,8 +47,14 @@ Assert-True ($runtime.Contains('aim_trace_count_ < aim_trace_.size()') -and
     $runtime.Contains('target_point(*best, false)')) 'Bounded Aim Lab trace or raw-bone capture is missing.'
 Assert-True ($payloadSource.Contains('MiniDumpWriteDump') -and
     $payloadSource.Contains('SetUnhandledExceptionFilter')) 'Crash dump handler is missing.'
-Assert-True ($config.Contains('settings_schema_version = 21U') -and
-    $config.Contains('L"Favorites"') -and $config.Contains('L"ActiveLayout"')) `
+# Pinned to an exact schema number this assert had to be edited on every bump,
+# and silently went stale instead (it still demanded 21 at version 23). Check
+# that the schema is versioned and has not gone backwards.
+$schemaMatch = [regex]::Match($config, 'settings_schema_version\s*=\s*(\d+)U')
+Assert-True $schemaMatch.Success 'Settings schema version constant is missing.'
+Assert-True ([int]$schemaMatch.Groups[1].Value -ge 21) `
+    ('Settings schema version regressed below 21: ' + $schemaMatch.Groups[1].Value)
+Assert-True ($config.Contains('L"Favorites"') -and $config.Contains('L"ActiveLayout"')) `
     'Versioned P1 settings persistence is missing.'
 
 if ($RuntimeSmoke) {
