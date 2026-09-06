@@ -3654,6 +3654,8 @@ namespace kopt
             L" discovery_ms=" + fixed(snapshot.discovery_ms, 3) +
             L" refresh_ms=" + fixed(snapshot.refresh_ms, 3) +
             L" refresh_deferred=" + std::to_wstring(snapshot.refresh_deferred) +
+            L" online=" + std::to_wstring(snapshot.server_players_connected) +
+            L" player_actors=" + std::to_wstring(snapshot.server_player_actors) +
             L" oldest_s=" + fixed(snapshot.oldest_actor_age_s, 2) +
             L" tracked=" + std::to_wstring(snapshot.actors.size()) +
             L" drawn=" + std::to_wstring(esp_stats_.drawn) +
@@ -3707,6 +3709,8 @@ namespace kopt
         row(L"Discovery", fixed(snapshot.discovery_ms, 2) + L" ms", text_primary);
         row(L"Refresh", fixed(snapshot.refresh_ms, 2) + L" ms", text_primary);
         row(L"Refresh backlog", std::to_wstring(snapshot.refresh_deferred), text_primary);
+        row(L"Players online", std::to_wstring(snapshot.server_players_connected), text_primary);
+        row(L"Player actors", std::to_wstring(snapshot.server_player_actors), text_primary);
         row(L"Oldest actor", fixed(snapshot.oldest_actor_age_s, 2) + L" s",
             snapshot.oldest_actor_age_s > 5.0F ? warning : text_primary);
         row(L"Captures", std::to_wstring(snapshot.captures), text_secondary);

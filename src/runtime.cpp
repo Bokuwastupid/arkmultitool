@@ -1642,11 +1642,13 @@ namespace kopt
     {
         snapshot_.server_players.clear();
         snapshot_.server_players_connected = 0;
+        snapshot_.server_player_actors = 0;
         snapshot_.server_roster_scanned = false;
         if (world < 0x10000) return;
         std::uintptr_t game_state{};
         if (!read(world + offsets_.world_game_state, game_state) || game_state < 0x10000) return;
         read(game_state + offsets_.game_state_num_connected, snapshot_.server_players_connected);
+        read(game_state + offsets_.game_state_num_player_actors, snapshot_.server_player_actors);
 
         // TArray layout: data pointer, then int32 Num, then int32 Max.
         std::uintptr_t data{};

@@ -259,7 +259,15 @@ namespace kopt
         // has not run yet or the roster genuinely is not replicated to this
         // client -- server_roster_scanned tells those apart.
         std::vector<ServerPlayer> server_players;
+        // AShooterGameState::NumPlayerConnected -- the server's own count of
+        // connected players. This is the one map-wide player fact a client can
+        // actually have: PlayerArray only ever contains our own PlayerState
+        // (measured 2026-09-06, one entry while the server reported four), so
+        // who is online is unanswerable but how many is exact.
         std::int32_t server_players_connected{};
+        // NumPlayerActors -- player pawns the server has spawned, which counts
+        // sleeping bodies too, so it runs above the connected count.
+        std::int32_t server_player_actors{};
         bool server_roster_scanned{};
         // Собственные имя/трайб -- читаются тем же offsets_.player_name/
         // tribe_name, что и для любого другого Actor::kind == player (см.
@@ -440,6 +448,7 @@ namespace kopt
             std::uintptr_t player_state_player_name{0x470};
             std::uintptr_t player_state_player_id{0x490};
             std::uintptr_t game_state_num_connected{0x54C};
+            std::uintptr_t game_state_num_player_actors{0x548};
             std::uintptr_t structure_name{0x4E8};
             std::uintptr_t status_component{0xCD0};
             std::uintptr_t status_current_values{0x818};
