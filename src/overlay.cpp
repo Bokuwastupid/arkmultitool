@@ -2807,6 +2807,7 @@ namespace kopt
                 slider(L"Live actor refresh", settings.refresh_interval_ms, 16.0F, 500.0F, content_left, y, input, L" ms");
                 slider(L"World actor discovery", settings.discovery_interval_ms, 250.0F, 5000.0F, content_left, y, input, L" ms");
                 slider(L"Discovery frame budget", settings.discovery_budget_ms, 1.0F, 20.0F, content_left, y, input, L" ms");
+                slider(L"Refresh frame budget", settings.refresh_budget_ms, 1.0F, 20.0F, content_left, y, input, L" ms");
                 text(L"Positions, vitals and bones use the fast path; class discovery uses the slow path.",
                     {content_left, y + 2.0F, frame.right - 32.0F, y + 42.0F}, text_secondary, 12.0F);
                 y += 48.0F;
@@ -3643,6 +3644,7 @@ namespace kopt
             L" runtime_ms=" + fixed(snapshot.runtime_update_ms, 3) +
             L" discovery_ms=" + fixed(snapshot.discovery_ms, 3) +
             L" refresh_ms=" + fixed(snapshot.refresh_ms, 3) +
+            L" refresh_deferred=" + std::to_wstring(snapshot.refresh_deferred) +
             L" oldest_s=" + fixed(snapshot.oldest_actor_age_s, 2) +
             L" tracked=" + std::to_wstring(snapshot.actors.size()) +
             L" drawn=" + std::to_wstring(esp_stats_.drawn) +
@@ -3695,6 +3697,7 @@ namespace kopt
             snapshot.runtime_update_ms > 8.0F ? warning : text_primary);
         row(L"Discovery", fixed(snapshot.discovery_ms, 2) + L" ms", text_primary);
         row(L"Refresh", fixed(snapshot.refresh_ms, 2) + L" ms", text_primary);
+        row(L"Refresh backlog", std::to_wstring(snapshot.refresh_deferred), text_primary);
         row(L"Oldest actor", fixed(snapshot.oldest_actor_age_s, 2) + L" s",
             snapshot.oldest_actor_age_s > 5.0F ? warning : text_primary);
         row(L"Captures", std::to_wstring(snapshot.captures), text_secondary);

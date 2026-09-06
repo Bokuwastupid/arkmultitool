@@ -483,6 +483,7 @@ namespace kopt
             (settings.player_aim && settings.aim_hitbox_mode == 1 && settings.aim_point_method != 2);
         need_held_items_ = settings.show_held_items;
         discovery_budget_ms_ = settings.discovery_budget_ms;
+        refresh_budget_ms_ = settings.refresh_budget_ms;
         read_local();
         const auto now = std::chrono::steady_clock::now();
         // Full level/actor enumeration allocates and copies every streamed level's
@@ -662,6 +663,15 @@ namespace kopt
                         actor.linked_player_data_id == local_player_data_id_)) continue;
                 if (known == existing.end())
                 {
+                    // Spread the first refresh of a newly discovered actor across its
+                    // cadence window. Discovery hands over thousands of structures in
+                    // one slice, and with a zeroed counter they all came due on the
+                    // same later frame -- at a big base that single refresh_known()
+                    // call measured 120-135 ms. The phase is derived from the address
+                    // so it stays stable if the actor is rediscovered.
+                    const std::uint64_t mixed = (static_cast<std::uint64_t>(address) >> 4) * 0x9E3779B97F4A7C15ULL;
+                    const float phase = static_cast<float>((mixed >> 40) & 0xFFFFU) / 65536.0F;
+                    actor.refresh_elapsed = refresh_cadence(actor.kind) * phase;
                     existing.emplace(address, snapshot_.actors.size());
                     snapshot_.actors.push_back(std::move(actor));
                 }
@@ -687,21 +697,62 @@ namespace kopt
         return true;
     }
 
+    float ArkRuntime::refresh_cadence(const ActorKind kind)
+    {
+        if (kind == ActorKind::player || kind == ActorKind::dino) return 0.0F;
+        if (kind == ActorKind::drop || kind == ActorKind::death_cache ||
+            kind == ActorKind::horde_crate || kind == ActorKind::element_node) return 0.10F;
+        return 0.50F;
+    }
+
     bool ArkRuntime::refresh_known(const float delta_seconds)
     {
         if (!read_local()) return false;
-        for (Actor& actor : snapshot_.actors)
-        {
-            actor.refresh_elapsed += delta_seconds;
-            const float cadence = actor.kind == ActorKind::player || actor.kind == ActorKind::dino ? 0.0F :
-                actor.kind == ActorKind::drop || actor.kind == ActorKind::death_cache ||
-                actor.kind == ActorKind::horde_crate || actor.kind == ActorKind::element_node ? 0.10F : 0.50F;
-            if (actor.refresh_elapsed < cadence) continue;
+        const auto refresh_started = std::chrono::steady_clock::now();
+        const auto refresh_one = [this](Actor& actor) {
             const float attempted_elapsed = actor.refresh_elapsed;
             actor.refresh_elapsed = 0.0F;
             if (refresh_actor_dynamic(actor, attempted_elapsed)) actor.stale_seconds = 0.0F;
             else actor.stale_seconds += attempted_elapsed;
+        };
+        // Live actors (players, dinos, loot) are few and must never lag, so they are
+        // always refreshed. Everything else -- structures, which is what a base is
+        // made of -- goes through a frame budget: the most overdue are served first,
+        // the rest keep their accumulated elapsed and get picked up on the next tick.
+        // Without this a base with ~17k structures produced a single 130 ms hitch
+        // every time the 0.5 s cadence came due.
+        refresh_due_.clear();
+        for (std::size_t index = 0; index < snapshot_.actors.size(); ++index)
+        {
+            Actor& actor = snapshot_.actors[index];
+            actor.refresh_elapsed += delta_seconds;
+            const float cadence = refresh_cadence(actor.kind);
+            if (actor.refresh_elapsed < cadence) continue;
+            if (cadence <= 0.0F) refresh_one(actor);
+            else refresh_due_.push_back(index);
         }
+        if (!refresh_due_.empty())
+        {
+            std::sort(refresh_due_.begin(), refresh_due_.end(),
+                [this](const std::size_t left, const std::size_t right) {
+                    return snapshot_.actors[left].refresh_elapsed > snapshot_.actors[right].refresh_elapsed;
+                });
+            const float remaining_budget_ms = std::max(1.0F, refresh_budget_ms_ -
+                std::chrono::duration<float, std::milli>(
+                    std::chrono::steady_clock::now() - refresh_started).count());
+            const auto budget_started = std::chrono::steady_clock::now();
+            std::size_t served{};
+            for (const std::size_t index : refresh_due_)
+            {
+                refresh_one(snapshot_.actors[index]);
+                ++served;
+                // Checked in blocks so the clock read does not dominate a cheap refresh.
+                if ((served & 0x3FU) == 0 && std::chrono::duration<float, std::milli>(
+                    std::chrono::steady_clock::now() - budget_started).count() >= remaining_budget_ms) break;
+            }
+            snapshot_.refresh_deferred = refresh_due_.size() - served;
+        }
+        else snapshot_.refresh_deferred = 0;
         std::erase_if(snapshot_.actors, [](const Actor& actor) {
             const float retention = actor.kind == ActorKind::player || actor.kind == ActorKind::dino ? 1.2F : 2.5F;
             return actor.stale_seconds > retention;

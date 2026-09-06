@@ -171,6 +171,7 @@ namespace kopt
         refresh_interval_ms = std::clamp(refresh_interval_ms, 16.0F, 1000.0F);
         discovery_interval_ms = std::clamp(discovery_interval_ms, 250.0F, 5000.0F);
         discovery_budget_ms = std::clamp(discovery_budget_ms, 1.0F, 20.0F);
+        refresh_budget_ms = std::clamp(refresh_budget_ms, 1.0F, 20.0F);
         alert_radius_m = std::clamp(alert_radius_m, 25.0F, 2000.0F);
         alert_noglin_radius_m = std::clamp(alert_noglin_radius_m, 10.0F, 1000.0F);
         alert_approach_speed_mps = std::clamp(alert_approach_speed_mps, 1.0F, 100.0F);
@@ -413,6 +414,7 @@ namespace kopt
         refresh_interval_ms = read_float(path, L"ESP", L"RefreshMs", refresh_interval_ms);
         discovery_interval_ms = read_float(path, L"ESP", L"DiscoveryMs", discovery_interval_ms);
         discovery_budget_ms = read_float(path, L"ESP", L"DiscoveryBudgetMs", discovery_budget_ms);
+        refresh_budget_ms = read_float(path, L"ESP", L"RefreshBudgetMs", refresh_budget_ms);
         esp_search = read_string(path, L"ESP", L"Search");
         hidden_tribes = read_string(path, L"ESP", L"HiddenTribes");
         hidden_dino_types = read_string(path, L"ESP", L"HiddenDinoTypes");
@@ -728,6 +730,7 @@ namespace kopt
         write_float(path, L"ESP", L"RefreshMs", refresh_interval_ms);
         write_float(path, L"ESP", L"DiscoveryMs", discovery_interval_ms);
         write_float(path, L"ESP", L"DiscoveryBudgetMs", discovery_budget_ms);
+        write_float(path, L"ESP", L"RefreshBudgetMs", refresh_budget_ms);
         write_value(path, L"ESP", L"Search", esp_search);
         write_value(path, L"ESP", L"HiddenTribes", hidden_tribes);
         write_value(path, L"ESP", L"HiddenDinoTypes", hidden_dino_types);

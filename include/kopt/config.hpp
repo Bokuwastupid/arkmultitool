@@ -208,6 +208,7 @@ namespace kopt
         float refresh_interval_ms{33.0F};
         float discovery_interval_ms{1000.0F};
         float discovery_budget_ms{8.0F};
+        float refresh_budget_ms{6.0F};
         std::wstring esp_search;
         std::wstring hidden_tribes;
         std::wstring hidden_dino_types;

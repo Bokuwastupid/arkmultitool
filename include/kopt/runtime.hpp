@@ -275,6 +275,7 @@ namespace kopt
         float runtime_update_ms{};
         float discovery_ms{};
         float refresh_ms{};
+        std::size_t refresh_deferred{};
         float oldest_actor_age_s{};
     };
 
@@ -416,6 +417,7 @@ namespace kopt
         bool resolve_globals();
         bool capture();
         bool refresh_known(float delta_seconds);
+        static float refresh_cadence(ActorKind kind);
         bool refresh_actor_dynamic(Actor& actor, float elapsed_seconds);
         bool read_local();
         bool read_actor(std::uintptr_t address, Actor& actor);
@@ -507,6 +509,8 @@ namespace kopt
         std::vector<std::uintptr_t> discovery_candidates_;
         std::size_t discovery_cursor_{};
         float discovery_budget_ms_{8.0F};
+        float refresh_budget_ms_{6.0F};
+        std::vector<std::size_t> refresh_due_;
         std::wstring status_{L"Waiting for ARK runtime"};
         struct ChamState
         {
