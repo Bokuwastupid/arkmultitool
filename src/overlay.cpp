@@ -2721,11 +2721,15 @@ namespace kopt
             }
             // Preview is a dedicated side window and remains visible for every ESP
             // section. It follows the menu and stays on its right whenever space allows.
+            // Only its position is decided here: it is a floating window beside the
+            // menu, not scrollable tab content, so drawing it inside the content
+            // clip would slice it off at the viewport edge. It is drawn after the
+            // clip is released, below.
             preview_left_ = frame.right + 12.0F;
             if (preview_left_ + 510.0F > width_ - 8.0F) preview_left_ = frame.left - 522.0F;
             preview_left_ = std::clamp(preview_left_, 8.0F, std::max(8.0F, width_ - 518.0F));
             preview_top_ = std::clamp(frame.top + 82.0F, 8.0F, std::max(8.0F, height_ - 416.0F));
-            draw_esp_preview(settings, preview_left_, preview_top_, input);
+            preview_pending_ = true;
         }
         else if (active_tab_ == 2)
         {
@@ -3291,6 +3295,11 @@ namespace kopt
         }
 
         clear_clip();
+        if (preview_pending_)
+        {
+            preview_pending_ = false;
+            draw_esp_preview(settings, preview_left_, preview_top_, input);
+        }
         menu_content_height_ = (y - content_origin) + 70.0F;
         if (menu_content_height_ > menu_viewport_height_)
         {

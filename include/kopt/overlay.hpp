@@ -323,6 +323,7 @@ namespace kopt
         std::size_t aim_replay_index_{};
         float preview_left_{};
         float preview_top_{};
+        bool preview_pending_{};
 
         // Per-frame diagnostics. Instantaneous values flicker too fast to read on
         // screen, so each timing keeps a rolling window and the panel shows the
