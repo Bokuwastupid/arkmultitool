@@ -1815,7 +1815,10 @@ namespace
                     g_overlay.set_remote_sightings(std::move(visible_batches));
                 }
                 g_overlay.render(swap_chain, g_settings, g_runtime, g_input, g_settings_path);
-                if (g_settings.debug_panel)
+                // Not gated on debug_panel. This is the periodic performance record
+                // in the log, not part of the on-screen panel, and tying the two
+                // together meant closing the panel silently stopped the only
+                // measurement that survives the session.
                 {
                     std::wstring diagnostics;
                     if (g_overlay.take_diagnostics_line(g_runtime, diagnostics)) log_line(diagnostics);
