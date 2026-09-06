@@ -221,6 +221,12 @@ namespace
     bool g_logged_mounted_safe_mode{};
     std::unordered_map<std::uintptr_t, std::wstring> g_logged_horde_previews;
     std::unordered_map<std::uintptr_t, std::wstring> g_logged_explorer_notes;
+    // Players seen this world generation, keyed by pawn address. The value is a
+    // signature rather than a flag so that a contact re-logs when something
+    // about it actually changed -- in practice when steam_id resolves after the
+    // first frames, which is the difference between a usable record and one that
+    // just says "someone was here".
+    std::unordered_map<std::uintptr_t, std::wstring> g_logged_player_contacts;
     int g_cursor_show_adjustment{};
     std::uint64_t g_game_swap_chain_area{};
     float g_pointer_scale_x{1.0F};
@@ -1747,6 +1753,7 @@ namespace
                     g_logged_world_generation = snapshot.world_generation;
                     g_logged_horde_previews.clear();
                     g_logged_explorer_notes.clear();
+                    g_logged_player_contacts.clear();
                     log_line(std::format(L"World generation changed: {} address=0x{:X}",
                         snapshot.world_generation, snapshot.world_address));
                 }
@@ -1790,6 +1797,33 @@ namespace
                     g_logged_explorer_notes[actor.address] = signature;
                     log_line(std::format(L"Explorer Note ESP 0x{:X}: class={} label={}",
                         actor.address, actor.class_name, actor.name));
+                }
+                // Every player contact goes into the log with its SteamID64, so the
+                // record survives the session and the 60-minute in-game journal.
+                // This is deliberately not gated on the ESP relation filter: the
+                // point is a complete contact history, not what was drawn.
+                for (const auto& actor : snapshot.actors)
+                {
+                    if (actor.kind != kopt::ActorKind::player) continue;
+                    const std::wstring signature = actor.name + L"|" + actor.tribe + L"|" +
+                        std::to_wstring(actor.steam_id);
+                    const auto known = g_logged_player_contacts.find(actor.address);
+                    if (known != g_logged_player_contacts.end() && known->second == signature) continue;
+                    const bool update = known != g_logged_player_contacts.end();
+                    g_logged_player_contacts[actor.address] = signature;
+                    const float to_local_x = actor.position.x - snapshot.local_position.x;
+                    const float to_local_y = actor.position.y - snapshot.local_position.y;
+                    const float to_local_z = actor.position.z - snapshot.local_position.z;
+                    const float distance_m = snapshot.local_valid ?
+                        std::sqrt(to_local_x * to_local_x + to_local_y * to_local_y +
+                            to_local_z * to_local_z) / 100.0F : 0.0F;
+                    log_line(std::format(
+                        L"Player {} 0x{:X}: name={} tribe={} steamid64={} team={} pos=({:.0f},{:.0f},{:.0f}) dist={:.0f}m",
+                        update ? L"contact updated" : L"contact", actor.address,
+                        actor.name.empty() ? L"?" : actor.name,
+                        actor.tribe.empty() ? L"?" : actor.tribe,
+                        actor.steam_id == 0 ? std::wstring(L"unresolved") : std::to_wstring(actor.steam_id),
+                        actor.team, actor.position.x, actor.position.y, actor.position.z, distance_m));
                 }
                 const std::uint32_t guard_hits = g_skeleton_guard_hits.load(std::memory_order_relaxed);
                 if (guard_hits != g_logged_skeleton_guard_hits)

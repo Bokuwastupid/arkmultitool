@@ -841,6 +841,15 @@ namespace kopt
         std::uint8_t state{};
         if (read(actor.address + offsets_.is_dead, state)) actor.dead = (state & 0x20) != 0;
         if (read(actor.address + offsets_.is_sleeping, state)) actor.sleeping = (state & 0x01) != 0;
+        // Retried while it is still zero, because read_actor() resolves it once
+        // at discovery and a player who just connected is exactly the case that
+        // fails there: the pawn replicates before its PlayerState does, so the
+        // chain reads null and the actor kept steam_id = 0 for as long as it
+        // stayed tracked. Only retried while zero -- a resolved id never changes
+        // for a given pawn, and a pawn whose owner has disconnected legitimately
+        // reads null again, which this must not overwrite with a stale value.
+        if (actor.kind == ActorKind::player && actor.steam_id == 0)
+            actor.steam_id = read_player_steam_id(actor.address);
         actor.bone_count = 0;
         if (actor.kind == ActorKind::player && need_player_bones_)
             read_player_bones(actor.address, actor.position, actor);
