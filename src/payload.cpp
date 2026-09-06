@@ -186,6 +186,17 @@ namespace
     std::atomic<int> g_local_chams_draw_mode{-1};
     std::atomic<std::uint32_t> g_local_chams_color{0xA33DFFFFU};
     std::atomic<int> g_freecam_wheel{};
+    // Values the unload teardown clobbered, so the config written on the way out
+    // reflects what the user had enabled rather than the disabled end state.
+    struct UnloadRestore
+    {
+        bool valid{};
+        bool freecam{};
+        bool local_chams{};
+        bool no_recoil{};
+        bool no_sway{};
+    } g_unload_restore;
+    void restore_settings_intent();
     std::atomic<bool> g_unload_cleanup_requested{};
     std::atomic<bool> g_unload_cleanup_completed{};
     bool g_menu_input_active{};
@@ -925,6 +936,12 @@ namespace
         else if (!g_unload_cleanup_requested.exchange(true, std::memory_order_acq_rel))
         {
             std::scoped_lock lock(g_state_mutex);
+            // Turning these off is a teardown step, not a change the user made.
+            // g_settings is what gets written to disk on the way out, so without
+            // remembering the real values first every unload persisted them as
+            // disabled and they came back off on the next inject.
+            g_unload_restore = {true, g_settings.freecam, g_settings.local_chams,
+                g_settings.no_recoil, g_settings.no_sway};
             g_settings.freecam = false;
             g_freecam_active.store(false, std::memory_order_release);
             g_freecam_pose_valid.store(false, std::memory_order_release);
@@ -2086,9 +2103,40 @@ namespace
         RemoveVectoredExceptionHandler(g_fatal_exception_logger_handle);
         SetUnhandledExceptionFilter(g_previous_exception_filter);
         if (g_unload_event != nullptr) CloseHandle(g_unload_event);
+        restore_settings_intent();
         g_settings.save(g_settings_path);
         CoUninitialize();
         FreeLibraryAndExitThread(g_module, 0);
+    }
+}
+
+namespace
+{
+    // Both teardown paths (unload cleanup, panic) deliberately switch features
+    // off in g_settings to stop them running. g_settings is also what gets
+    // written to disk, so saving straight after either one persisted the
+    // teardown as if the user had turned everything off themselves. Put the
+    // user's actual intent back before the config is written.
+    void restore_settings_intent()
+    {
+        if (g_panic_state.active)
+        {
+            g_settings.menu_open = g_panic_state.menu;
+            g_settings.esp_enabled = g_panic_state.esp;
+            g_settings.freecam = g_panic_state.freecam;
+            g_settings.local_chams = g_panic_state.local_chams;
+            g_settings.no_recoil = g_panic_state.no_recoil;
+            g_settings.no_sway = g_panic_state.no_sway;
+            g_panic_state.active = false;
+        }
+        if (g_unload_restore.valid)
+        {
+            g_settings.freecam = g_unload_restore.freecam;
+            g_settings.local_chams = g_unload_restore.local_chams;
+            g_settings.no_recoil = g_unload_restore.no_recoil;
+            g_settings.no_sway = g_unload_restore.no_sway;
+            g_unload_restore.valid = false;
+        }
     }
 }
 
@@ -2114,7 +2162,11 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         // never runs. Without this, settings changed in a session that ends by
         // just quitting ARK were silently lost. Safe here: plain file I/O, no
         // new threads, no other DLLs touched.
-        if (!g_settings_path.empty()) g_settings.save(g_settings_path);
+        if (!g_settings_path.empty())
+        {
+            restore_settings_intent();
+            g_settings.save(g_settings_path);
+        }
     }
     return TRUE;
 }
