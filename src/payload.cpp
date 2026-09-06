@@ -232,7 +232,7 @@ namespace
     // than re-listing the roster on every scan.
     std::unordered_map<std::uintptr_t, std::wstring> g_logged_server_players;
     bool g_logged_roster_availability{};
-    bool g_logged_roster_available{};
+    std::wstring g_logged_roster_shape;
     int g_cursor_show_adjustment{};
     std::uint64_t g_game_swap_chain_area{};
     float g_pointer_scale_x{1.0F};
@@ -1839,15 +1839,26 @@ namespace
                 // the one fact that decides if map-wide player scanning is
                 // possible, so it is stated once per world rather than inferred
                 // from an empty list.
-                if (snapshot.server_roster_scanned &&
-                    (!g_logged_roster_availability ||
-                        g_logged_roster_available != !snapshot.server_players.empty()))
+                if (snapshot.server_roster_scanned)
                 {
-                    g_logged_roster_availability = true;
-                    g_logged_roster_available = !snapshot.server_players.empty();
-                    log_line(std::format(
-                        L"Server roster: {} PlayerState entries readable, NumPlayerConnected={}",
-                        snapshot.server_players.size(), snapshot.server_players_connected));
+                    // Logged on every change of either number, not just on the
+                    // empty/non-empty transition: the question is whether the
+                    // roster ever grows past our own entry when other players are
+                    // nearby, and a one-shot line cannot answer that. The local
+                    // SteamID64 rides along so "one entry" can be confirmed as
+                    // ours rather than assumed to be.
+                    const std::wstring shape = std::to_wstring(snapshot.server_players.size()) + L"/" +
+                        std::to_wstring(snapshot.server_players_connected);
+                    if (!g_logged_roster_availability || g_logged_roster_shape != shape)
+                    {
+                        g_logged_roster_availability = true;
+                        g_logged_roster_shape = shape;
+                        log_line(std::format(
+                            L"Server roster: {} PlayerState entries readable, NumPlayerConnected={}, local steamid64={}",
+                            snapshot.server_players.size(), snapshot.server_players_connected,
+                            snapshot.local_steam_id == 0 ? std::wstring(L"unresolved") :
+                                std::to_wstring(snapshot.local_steam_id)));
+                    }
                 }
                 for (const auto& player : snapshot.server_players)
                 {
