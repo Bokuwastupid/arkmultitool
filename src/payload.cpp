@@ -6,7 +6,9 @@
 #include "kopt/share.hpp"
 #include "kopt/share_filter.hpp"
 #include "kopt/share_remote.hpp"
+#if KOPT_ENABLE_SHARE
 #include "kopt/http3_publisher.hpp"
+#endif
 
 #include <windows.h>
 #include <windowsx.h>
@@ -103,7 +105,16 @@ namespace
     HMODULE g_module{};
     kopt::Settings g_settings;
     kopt::ArkRuntime g_runtime;
+    // NoopPublisher when the build has no QUIC transport (see
+    // KOPT_ENABLE_SHARE in CMakeLists.txt). Everything upstream of the
+    // publisher -- sighting building, the change filter, the alert queue --
+    // still runs and is still testable; the batches simply go nowhere, and
+    // connected() staying false keeps the UI honest about it.
+#if KOPT_ENABLE_SHARE
     std::unique_ptr<kopt::Publisher> g_publisher = std::make_unique<kopt::Http3Publisher>();
+#else
+    std::unique_ptr<kopt::Publisher> g_publisher = std::make_unique<kopt::NoopPublisher>();
+#endif
     std::chrono::steady_clock::time_point g_last_share_submit{};
     // Whether g_publisher->start() has actually been called (not just
     // whether the user wants share on) -- lets the start attempt keep

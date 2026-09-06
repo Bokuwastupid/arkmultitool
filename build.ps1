@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet('Debug', 'Release')]
     [string]$Configuration = 'Release',
     [string]$PayloadName = 'kopt_payload.dll'
@@ -25,11 +25,20 @@ $compileConfig = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\config
 $compileOverlay = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\overlay.cpp') + '" /Fo"' + (Join-Path $objects 'overlay.obj') + '"'
 $compilePayload = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\payload.cpp') + '" /Fo"' + (Join-Path $objects 'payload.obj') + '"'
 $compileRuntime = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\runtime.cpp') + '" /Fo"' + (Join-Path $objects 'runtime.obj') + '"'
+# share*.cpp are plain C++ with no QUIC dependency -- payload.cpp calls into
+# them (build_sightings, ChangeFilter, RemoteView) whether or not the network
+# transport is built. http3_publisher.cpp is deliberately absent: it needs
+# ngtcp2/OpenSSL built for mingw, which does not exist on Windows, so this
+# build leaves KOPT_ENABLE_SHARE undefined and the payload falls back to
+# kopt::NoopPublisher (see publisher.hpp and CMakeLists.txt's option).
+$compileShare = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\share.cpp') + '" /Fo"' + (Join-Path $objects 'share.obj') + '"'
+$compileShareFilter = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\share_filter.cpp') + '" /Fo"' + (Join-Path $objects 'share_filter.obj') + '"'
+$compileShareRemote = 'cl ' + $common + ' /c "' + (Join-Path $projectRoot 'src\share_remote.cpp') + '" /Fo"' + (Join-Path $objects 'share_remote.obj') + '"'
 $payloadOutput = Join-Path $dist $PayloadName
-$linkPayload = 'link /nologo /dll /out:"' + $payloadOutput + '" /implib:"' + (Join-Path $build 'kopt_payload.lib') + '" "' + (Join-Path $objects 'config.obj') + '" "' + (Join-Path $objects 'overlay.obj') + '" "' + (Join-Path $objects 'payload.obj') + '" "' + (Join-Path $objects 'runtime.obj') + '" d3d11.lib d3dcompiler.lib dxgi.lib gdi32.lib user32.lib winmm.lib ole32.lib dbghelp.lib'
+$linkPayload = 'link /nologo /dll /out:"' + $payloadOutput + '" /implib:"' + (Join-Path $build 'kopt_payload.lib') + '" "' + (Join-Path $objects 'config.obj') + '" "' + (Join-Path $objects 'overlay.obj') + '" "' + (Join-Path $objects 'payload.obj') + '" "' + (Join-Path $objects 'runtime.obj') + '" "' + (Join-Path $objects 'share.obj') + '" "' + (Join-Path $objects 'share_filter.obj') + '" "' + (Join-Path $objects 'share_remote.obj') + '" d3d11.lib d3dcompiler.lib dxgi.lib gdi32.lib user32.lib winmm.lib ole32.lib dbghelp.lib'
 $buildInjector = 'cl ' + $common + ' "' + (Join-Path $projectRoot 'src\injector.cpp') + '" /Fe:"' + (Join-Path $dist 'kopt_injector.exe') + '" /Fo"' + (Join-Path $objects 'injector.obj') + '" /link /pdb:"' + (Join-Path $build 'kopt_injector.pdb') + '" advapi32.lib psapi.lib bcrypt.lib shell32.lib user32.lib'
 $buildQuickInjector = 'cl ' + $common + ' /DKOPT_QUICK_GUI "' + (Join-Path $projectRoot 'src\injector.cpp') + '" /Fe:"' + (Join-Path $dist 'KOPT_Inject.exe') + '" /Fo"' + (Join-Path $objects 'quick_injector.obj') + '" /link /subsystem:windows /pdb:"' + (Join-Path $build 'KOPT_Inject.pdb') + '" advapi32.lib psapi.lib bcrypt.lib shell32.lib user32.lib'
-$nativeCommand = '"' + $devCmd + '" -no_logo -arch=x64 -host_arch=x64 && ' + $compileConfig + ' && ' + $compileOverlay + ' && ' + $compilePayload + ' && ' + $compileRuntime + ' && ' + $linkPayload + ' && ' + $buildInjector + ' && ' + $buildQuickInjector
+$nativeCommand = '"' + $devCmd + '" -no_logo -arch=x64 -host_arch=x64 && ' + $compileConfig + ' && ' + $compileOverlay + ' && ' + $compilePayload + ' && ' + $compileRuntime + ' && ' + $compileShare + ' && ' + $compileShareFilter + ' && ' + $compileShareRemote + ' && ' + $linkPayload + ' && ' + $buildInjector + ' && ' + $buildQuickInjector
 & cmd.exe /d /s /c $nativeCommand
 if ($LASTEXITCODE -ne 0) { throw 'Native build failed.' }
 & (Join-Path $build 'dist\kopt_injector.exe') --self-test --dll $payloadOutput

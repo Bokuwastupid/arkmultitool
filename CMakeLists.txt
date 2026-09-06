@@ -25,7 +25,33 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # tracked file would ship with every clone/fork of this repo.
 set(KOPT_RELAY_DEFAULT "127.0.0.1:8443" CACHE STRING "Default kopt_payload relay address (host:port), overridable via ini/--backend at runtime")
 
-add_library(kopt_payload SHARED
+# The QUIC transport needs ngtcp2/OpenSSL cross-compiled for
+# x86_64-w64-mingw32 (scripts/fetch-quic-deps.sh, needs `nix`), which only
+# exists on the Linux side of this project. Those are mingw import libraries
+# (.dll.a) that MSVC cannot consume at all, so on Windows the whole tree used
+# to be unbuildable rather than just missing sharing. The transport is now
+# optional: everything else -- ESP, aim, overlay, injector -- builds without
+# it and the payload falls back to kopt::NoopPublisher (publisher.hpp, which
+# already anticipated exactly this case). Default stays ON so a Linux build
+# with the deps present is unchanged.
+set(KOPT_QUIC_DEPS_DIR "${CMAKE_SOURCE_DIR}/third_party/quic-mingw64")
+if(EXISTS "${KOPT_QUIC_DEPS_DIR}/include/ngtcp2/ngtcp2.h" AND NOT MSVC)
+    set(KOPT_SHARE_AVAILABLE ON)
+else()
+    set(KOPT_SHARE_AVAILABLE OFF)
+endif()
+option(KOPT_ENABLE_SHARE "Build the QUIC backend-sharing transport" ${KOPT_SHARE_AVAILABLE})
+if(KOPT_ENABLE_SHARE AND NOT EXISTS "${KOPT_QUIC_DEPS_DIR}/include/ngtcp2/ngtcp2.h")
+    message(FATAL_ERROR
+        "KOPT_ENABLE_SHARE is ON but third_party/quic-mingw64 is missing ngtcp2 "
+        "headers -- run scripts/fetch-quic-deps.sh first (needs `nix` on PATH), "
+        "or configure with -DKOPT_ENABLE_SHARE=OFF to build without sharing.")
+endif()
+if(NOT KOPT_ENABLE_SHARE)
+    message(STATUS "KOPT: building without the QUIC sharing transport (NoopPublisher)")
+endif()
+
+set(KOPT_PAYLOAD_SOURCES
     src/config.cpp
     src/overlay.cpp
     src/payload.cpp
@@ -33,8 +59,11 @@ add_library(kopt_payload SHARED
     src/share.cpp
     src/share_filter.cpp
     src/share_remote.cpp
-    src/http3_publisher.cpp
 )
+if(KOPT_ENABLE_SHARE)
+    list(APPEND KOPT_PAYLOAD_SOURCES src/http3_publisher.cpp)
+endif()
+add_library(kopt_payload SHARED ${KOPT_PAYLOAD_SOURCES})
 target_include_directories(kopt_payload PRIVATE include)
 target_compile_definitions(kopt_payload PRIVATE
     UNICODE
@@ -57,12 +86,8 @@ target_link_libraries(kopt_payload PRIVATE d3d11 d3dcompiler dxgi gdi32 user32 w
 # quicserver) is bare QUIC, not HTTP/3, so Http3Publisher (kopt::share's
 # transport, despite the name inherited from the original plan) has no use
 # for an HTTP/3 framing layer.
-set(KOPT_QUIC_DEPS_DIR "${CMAKE_SOURCE_DIR}/third_party/quic-mingw64")
-if(NOT EXISTS "${KOPT_QUIC_DEPS_DIR}/include/ngtcp2/ngtcp2.h")
-    message(FATAL_ERROR
-        "third_party/quic-mingw64 is missing ngtcp2 headers -- run "
-        "scripts/fetch-quic-deps.sh first (needs `nix` on PATH).")
-endif()
+if(KOPT_ENABLE_SHARE)
+target_compile_definitions(kopt_payload PRIVATE KOPT_ENABLE_SHARE=1)
 target_include_directories(kopt_payload PRIVATE "${KOPT_QUIC_DEPS_DIR}/include")
 # Explicit .dll.a paths, not target_link_directories + -l names: nixpkgs'
 # mingw cross build of ngtcp2/OpenSSL is shared-library-only (no plain
@@ -79,6 +104,7 @@ endforeach()
 # BCrypt (ngtcp2_crypto_ossl's OpenSSL backend still calls into Windows'
 # own CNG for a few platform RNG paths on this target).
 target_link_libraries(kopt_payload PRIVATE ws2_32 bcrypt)
+endif()
 set_target_properties(kopt_payload PROPERTIES
     PREFIX ""
     OUTPUT_NAME "kopt_payload"
@@ -149,6 +175,7 @@ target_compile_definitions(kopt_share_selftest PRIVATE
 # into ShooterGame.exe) so a hard crash surfaces Wine's own SEH backtrace
 # instead of vanishing inside someone else's process. Same QUIC deps/link
 # setup as kopt_payload, minus the D3D11/game-hook pieces it doesn't need.
+if(KOPT_ENABLE_SHARE)
 add_executable(kopt_quic_test
     src/http3_publisher.cpp
     src/quic_test_main.cpp
@@ -164,23 +191,27 @@ foreach(quic_lib ngtcp2 ngtcp2_crypto_ossl ssl crypto)
     target_link_libraries(kopt_quic_test PRIVATE "${KOPT_QUIC_DEPS_DIR}/lib/lib${quic_lib}.dll.a")
 endforeach()
 target_link_libraries(kopt_quic_test PRIVATE ws2_32 bcrypt)
+endif()
+
+set(KOPT_ALL_TARGETS kopt_payload kopt_injector kopt_quick_injector kopt_version_proxy kopt_share_selftest)
+if(KOPT_ENABLE_SHARE)
+    list(APPEND KOPT_ALL_TARGETS kopt_quic_test)
+endif()
 
 if(MSVC)
-    set_property(TARGET kopt_payload kopt_injector kopt_quick_injector kopt_version_proxy kopt_share_selftest kopt_quic_test PROPERTY
+    set_property(TARGET ${KOPT_ALL_TARGETS} PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     target_compile_options(kopt_payload PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_injector PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_quick_injector PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_version_proxy PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_options(kopt_share_selftest PRIVATE /W4 /permissive- /EHsc /utf-8)
-    target_compile_options(kopt_quic_test PRIVATE /W4 /permissive- /EHsc /utf-8)
 else()
     target_compile_options(kopt_payload PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_injector PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_quick_injector PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_version_proxy PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(kopt_share_selftest PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(kopt_quic_test PRIVATE -Wall -Wextra -Wpedantic)
     # Fully static, not just -static-libgcc/-libstdc++: the nixpkgs
     # mingw-w64 cross toolchain defaults to the mcfgthread threading model,
     # whose runtime (libmcfgthread-2.dll) ships as a DLL that exists
@@ -197,10 +228,9 @@ else()
     target_link_options(kopt_quick_injector PRIVATE -static -municode)
     target_link_options(kopt_version_proxy PRIVATE -static)
     target_link_options(kopt_share_selftest PRIVATE -static)
-    target_link_options(kopt_quic_test PRIVATE -static)
 endif()
 
-foreach(target kopt_payload kopt_injector kopt_quick_injector kopt_version_proxy kopt_share_selftest kopt_quic_test)
+foreach(target ${KOPT_ALL_TARGETS})
     set_target_properties(${target} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dist"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dist"
